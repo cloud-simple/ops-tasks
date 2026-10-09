@@ -1,5 +1,6 @@
 ---
 name: ops-task
+allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/tasks.py *)
 description: Create, plan, run and record infrastructure operations tasks kept as tasks/NN-slug/ folders with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script under tasks/, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
 ---
 
@@ -25,6 +26,7 @@ tasks/
 
 - `NN` is two digits, the next free number. `slug` is lowercase words joined by hyphens.
 - Create each task with `tasks.py new <slug> --title "<Title>"`, not by hand. Commands: see Workflow.
+- `tasks.py` means `${CLAUDE_SKILL_DIR}/scripts/tasks.py`. Run it directly, not through `python3`, so the `allowed-tools` rule above matches; it covers only the turn that invokes this skill. Never write that path into a repo: it changes with every plugin version.
 - Write in plain language: short sentences, active voice, one term per item, `must` for requirements.
 
 ## TODO.md: the problem and the ideas
@@ -140,7 +142,7 @@ Cover these cases, scaled by the kind of helper:
 
 Fixtures must use fake names, addresses and credentials (`*.test.invalid`, `not-a-real-password`).
 
-To change the shared library: edit `assets/lib/` in this skill and run its tests (`python3 assets/lib/stubtest.py --test`, `bash assets/lib/with_timeout.sh --test`), then follow Workflow step 0.
+To change the shared library: edit `skills/ops-task/assets/lib/` in the plugin repo, not the installed copy, run its tests there (`python3 skills/ops-task/assets/lib/stubtest.py --test`, `bash skills/ops-task/assets/lib/with_timeout.sh --test`), release the plugin, then follow Workflow step 0 in each repo.
 
 ## Workflow
 
@@ -154,11 +156,11 @@ To change the shared library: edit `assets/lib/` in this skill and run its tests
 5. **Before committing:** run the checks and fix every error.
 
 ```bash
-python3 .claude/skills/ops-task/scripts/tasks.py init                 # install or update tasks/lib/ (overwrites it)
-python3 .claude/skills/ops-task/scripts/tasks.py status               # status, deadline, checkbox counts
-python3 .claude/skills/ops-task/scripts/tasks.py lint                 # structure, links, secrets, helpers, tasks/lib/
-python3 .claude/skills/ops-task/scripts/tasks.py lint --run-tests     # also run the tests of tasks/lib/ and every helper
-python3 .claude/skills/ops-task/scripts/tasks.py --test               # the tool's own tests
+${CLAUDE_SKILL_DIR}/scripts/tasks.py init                 # install or update tasks/lib/ (overwrites it)
+${CLAUDE_SKILL_DIR}/scripts/tasks.py status               # status, deadline, checkbox counts
+${CLAUDE_SKILL_DIR}/scripts/tasks.py lint                 # structure, links, secrets, helpers, tasks/lib/
+${CLAUDE_SKILL_DIR}/scripts/tasks.py lint --run-tests     # also run the tests of tasks/lib/ and every helper
+${CLAUDE_SKILL_DIR}/scripts/tasks.py --test               # the tool's own tests
 ```
 
 `status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.

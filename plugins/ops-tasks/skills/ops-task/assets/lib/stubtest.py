@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# ops-task lib, installed from the ops-task skill (assets/lib/). Edit it there, not here:
-# tasks.py init overwrites this file.
+# ops-task lib, installed by tasks.py init from the ops-task plugin (skills/ops-task/assets/lib/).
+# Edit it in the plugin repo, not here: tasks.py init overwrites this file.
 """Offline test runner for task helper scripts.
 
 Purpose: run a helper script against canned command outputs in a controlled test environment.

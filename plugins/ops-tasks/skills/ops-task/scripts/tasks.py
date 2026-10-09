@@ -179,8 +179,8 @@ def cmd_init(root: Path) -> list:
     if links:
         raise SystemExit(f"Refusing to write: {', '.join(links)} is a symbolic link. Nothing was written.")
     lib.mkdir(parents=True, exist_ok=True)
-    lines = ["tasks/lib/ is installed from the ops-task skill (assets/lib/) and is overwritten on every init.",
-             "Changes made by hand in tasks/lib/ are lost; make them in the skill instead."]
+    lines = ["tasks/lib/ is installed from the ops-task plugin (skills/ops-task/assets/lib/) and is overwritten on every init.",
+             "Changes made by hand in tasks/lib/ are lost; make them in the plugin repo instead."]
     changed = 0
     for name in LIB_FILES:
         src, dst = ASSETS / "lib" / name, lib / name
