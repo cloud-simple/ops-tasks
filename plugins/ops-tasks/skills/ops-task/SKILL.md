@@ -8,6 +8,7 @@ description: Create, plan, run and record infrastructure operations tasks kept a
 Each operations task lives in one folder with the same three parts.
 
 ```
+.env                 settings and credentials of the default connection; created by the user, git-ignored
 tasks/
   NN-slug/
     TODO.md          problem, ideas, status
@@ -114,7 +115,7 @@ Rules, and why:
 - **Bash only:** `NN-verb-object.sh`, numbered by creation order within the task, first line `#!/usr/bin/env bash`, run directly so the shebang picks the shell. Use `jq` for JSON and `awk` or `sed` for text. Link the helper from every step that uses it.
 - **Header:** `Purpose:`, `Usage:`, `Effect:` (`read-only` or `changes: ...`), `Runs on:`, `Connection:` (the Connections ID) and `Exit:` codes. Template: [assets/script.sh](assets/script.sh).
 - **Connection:** a helper reads settings only from the source its Connections entry names. The repo `.env`, loaded through `${OPS_ENV_FILE:-$REPO/.env}`, holds the default connection; a helper for another connection must not load it, because it would override that connection's settings.
-- **Secrets:** never in `tasks/` (plans, helpers, tests, `out/`). They live in the env file or the password manager named in Connections. Read a typed secret with a hidden prompt; never print it, and never pass it as a command-line argument when the tool has another input (environment variable, standard input, file). A tool that only takes it as an argument is a documented exception: say so in the plan; other local processes can see the argument while the command runs.
+- **Secrets:** never in `tasks/` (plans, helpers, tests, `out/`). They live in the env file or the password manager named in Connections. Read a typed secret with a hidden prompt; never print it, and never pass it as a command-line argument when the tool has another input (environment variable, standard input, file). A tool that only takes it as an argument is a documented exception: say so in the plan; other local processes can see the argument while the command runs. Never print `.env` or show its values; to see what it holds, list the variable names only (`sed 's/=.*/=<redacted>/' .env`).
 - **Target:** before any call, check that the helper talks to the system named in its Connections entry, and exit 2 if not. Compare the parsed identifier exactly (host, context, account), never as a substring: `api.example.com.evil.net` contains `api.example.com`. Never print the rejected value. The template shows checks for a URL, an SSH host and a Kubernetes context.
 - **`--test` first:** handle `--test` before loading credentials or any setup.
 - **Dry run by default:** a helper that changes anything prints the exact target and action and changes nothing unless given `--apply`. During `--apply` it checks the preconditions again. Unknown flags exit 2. A dry run can still open sessions or write local files; it only promises no infrastructure change.
@@ -143,10 +144,12 @@ To change the shared library: edit `assets/lib/` in this skill and run its tests
 
 ## Workflow
 
-0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `tasks/lib/`, lists what changed), `tasks.py lint --run-tests`, then commit `tasks/lib/`.
+0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `tasks/lib/`, lists what changed), `tasks.py lint --run-tests`, then commit `tasks/lib/`. The user creates `.env` with the default connection's settings and credentials; it must be listed in `.gitignore`.
 1. **New task:** `tasks.py new <slug>`. Fill in TODO.md: the problem and the ideas. Status `open`.
-2. **Plan:** collect facts with read-only commands and put them, dated, in PLAN.md. List the Connections. Write the steps. Set status `planned`.
-3. **Run:** for each step, run Before, then Do, then After. Change infrastructure only within the scope the user authorized, and honor any gate a step names. Tick each action when it ran, and the After box when the After check passed. Set status `in progress`.
+   - Problem, impact, deadline, owners and constraints come from the user; ask when any of them is unclear, do not guess.
+   - Ideas come from your knowledge and from documentation, each with its trade-off and, where possible, a link. The user marks an idea **Chosen** or **Rejected**; until then it stays **Open**.
+2. **Plan:** collect facts with read-only commands and put them, dated, in PLAN.md, each with its command. A value you could not measure is an open question, not a fact. List the Connections. Write the steps. Set status `planned`.
+3. **Run:** for each step, run Before, then Do, then After. Change infrastructure only within the scope the user authorized, and honor any gate a step names. Tick each action when it ran, and the After box when the After check passed; Results and Log entries record only what the commands showed. Set status `in progress`.
 4. **Close:** `done` with the date when every active checkbox is ticked; optional steps that were not run move to `## Not used`. `dropped` with the date keeps the unticked history: write the reason in the Log, and never tick a check that did not pass.
 5. **Before committing:** run the checks and fix every error.
 

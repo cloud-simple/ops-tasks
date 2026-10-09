@@ -9,7 +9,7 @@ Usage:   tasks.py [--root DIR] init                      install or update tasks
                                                          check structure; --run-tests also runs every
                                                          helper's --test and the shared test runner
          tasks.py --test                                 run this tool's own self-tests
-Effect:  `init` overwrites tasks/lib/ and may add a line to .gitignore. `new` writes one new folder
+Effect:  `init` overwrites tasks/lib/ and may add '/tasks/*/out/' and '.env' to .gitignore. `new` writes one new folder
          (and runs `init` when tasks/lib/ is missing). `status` and `lint` only read. `lint --run-tests`
          runs the offline tests of tasks/lib/ and of the helpers.
 Runs on: any machine with Python 3.9 or later. Standard library only.
@@ -148,11 +148,27 @@ def read_status(todo: Path):
 
 # --- init ---------------------------------------------------------------------------------------
 
-def has_out_rule(gitignore: Path) -> bool:
-    """True if .gitignore has the rule /tasks/*/out/ as a real line (not in a comment)."""
+IGNORE_RULES = {"/tasks/*/out/": ("/tasks/*/out/", "/tasks/*/out"), ".env": (".env", "/.env")}
+
+
+def has_rule(gitignore: Path, accepted) -> bool:
+    """True if .gitignore has one of the accepted rules as a real line (not in a comment)."""
     if not gitignore.exists():
         return False
-    return any(line.strip() in ("/tasks/*/out/", "/tasks/*/out") for line in gitignore.read_text().splitlines())
+    return any(line.strip() in accepted for line in gitignore.read_text().splitlines())
+
+
+def has_out_rule(gitignore: Path) -> bool:
+    return has_rule(gitignore, IGNORE_RULES["/tasks/*/out/"])
+
+
+def env_is_ignored(root: Path) -> bool:
+    """True if .env is ignored: asks git in a git repo (so patterns like .env* count), else checks the rule line."""
+    if (root / ".git").exists():
+        proc = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", ".env"], capture_output=True)
+        if proc.returncode in (0, 1):
+            return proc.returncode == 0
+    return has_rule(root / ".gitignore", IGNORE_RULES[".env"])
 
 
 def cmd_init(root: Path) -> list:
@@ -177,10 +193,12 @@ def cmd_init(root: Path) -> list:
         dst.chmod(0o755)
         changed += 1
     gi = root / ".gitignore"
-    text = gi.read_text() if gi.exists() else ""
-    if not has_out_rule(gi):
-        gi.write_text(text + ("" if not text or text.endswith("\n") else "\n") + "/tasks/*/out/\n")
-        lines.append("  added '/tasks/*/out/' to .gitignore")
+    for rule, accepted in IGNORE_RULES.items():
+        if rule == ".env" and env_is_ignored(root) or rule != ".env" and has_rule(gi, accepted):
+            continue
+        text = gi.read_text() if gi.exists() else ""
+        gi.write_text(text + ("" if not text or text.endswith("\n") else "\n") + rule + "\n")
+        lines.append(f"  added '{rule}' to .gitignore")
     lines.append(f"Updated {changed} file(s)." + (" Next: tasks.py lint --run-tests, then commit tasks/lib/." if changed else ""))
     return lines
 
@@ -508,6 +526,11 @@ def cmd_lint(root: Path, names: list, with_tests: bool) -> Report:
     gi = root / ".gitignore"
     if not has_out_rule(gi):
         rep.warn(gi, "add '/tasks/*/out/' so captured state stays out of git")
+    if not env_is_ignored(root):
+        if (root / ".env").exists():
+            rep.error(root / ".env", "exists but is not ignored by git; add '.env' to .gitignore (run tasks.py init)")
+        else:
+            rep.warn(gi, "add '.env' so the connection settings and credentials stay out of git")
     if with_tests:
         run_tests(root, tasks, rep)
     return rep
@@ -686,6 +709,35 @@ class SelfTests(unittest.TestCase):
         (self.root / ".gitignore").write_text(".env")
         cmd_init(self.root)
         self.assertEqual((self.root / ".gitignore").read_text(), ".env\n/tasks/*/out/\n")
+
+    def test_init_adds_env_to_gitignore(self):
+        (self.root / ".gitignore").write_text("/tasks/*/out/\n")
+        notice = "\n".join(cmd_init(self.root))
+        self.assertEqual((self.root / ".gitignore").read_text(), "/tasks/*/out/\n.env\n")
+        self.assertIn("added '.env' to .gitignore", notice)
+        self.assertNotIn("added '.env'", "\n".join(cmd_init(self.root)))  # second run adds nothing
+
+    def test_lint_checks_that_env_is_ignored(self):
+        self.make_good_task()
+        gi = self.root / ".gitignore"
+        gi.write_text("/tasks/*/out/\n")
+        rep = cmd_lint(self.root, [], False)
+        self.assertTrue(any("add '.env'" in w for w in rep.warnings))  # no .env yet: warning only
+        (self.root / ".env").write_text("export GOVC_URL='https://vcenter.test.invalid'\n")
+        self.assertIn(".env: exists but is not ignored by git", "\n".join(cmd_lint(self.root, [], False).errors))
+        gi.write_text("/tasks/*/out/\n.env\n")
+        rep = cmd_lint(self.root, [], False)
+        self.assertEqual(rep.errors, [])
+        self.assertFalse(any(".env" in w for w in rep.warnings))
+
+    def test_env_ignored_by_a_git_pattern_counts(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not installed")
+        self.make_good_task()
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        (self.root / ".gitignore").write_text("/tasks/*/out/\n.env*\n")
+        (self.root / ".env").write_text("x=1\n")
+        self.assertEqual(cmd_lint(self.root, [], False).errors, [])
 
     def test_new_installs_the_lib_when_missing(self):
         shutil.rmtree(self.root / "tasks" / "lib")
