@@ -4,18 +4,18 @@
 #             NN-verb-object.sh --test       run the offline self-tests (no infrastructure access)
 # Effect:     <read-only | changes: what it changes; dry run unless --apply>
 # Runs on:    <where it runs, for example the operator's workstation or a jump host>
-# Connection: <ID from PLAN.md "## Connections", for example "vc (repo .env)">
+# Connection: <ID from PLAN.md "## Connections", for example "vc (<ops-dir>/.env)">
 # Exit:       0 done, 1 a check or action failed, 2 wrong arguments, wrong target or failed precondition,
 #             124 a call hit its time limit (when the helper passes that code on).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/../../.." && pwd)"
+LIB="$(cd "$HERE/../../lib" && pwd)"   # <ops-dir>/tasks/lib/, wherever <ops-dir> is
 
 APPLY=0
 [[ $# -le 1 ]] || { echo "Too many arguments: use one of --apply, --test" >&2; exit 2; }
 case "${1:-}" in
-  --test) exec python3 "$REPO/tasks/lib/stubtest.py" "$0" ;;   # before any setup or credentials
+  --test) exec python3 "$LIB/stubtest.py" "$0" ;;   # before any setup or credentials
   --apply) APPLY=1 ;;
   "") ;;
   *) echo "Unknown argument: $1" >&2; exit 2 ;;
@@ -23,11 +23,12 @@ esac
 
 TIMEOUT="${OPS_TIMEOUT:-60}"   # seconds per call, used by with_timeout
 # shellcheck source=../../lib/with_timeout.sh
-source "$REPO/tasks/lib/with_timeout.sh"
+source "$LIB/with_timeout.sh"
 
-# Uncomment only if the Connections entry of this helper names the repo .env:
+# Uncomment only if the Connections entry of this helper names an env file. Give its path
+# relative to this script; <ops-dir>/.env is three folders up from <ops-dir>/tasks/NN-slug/scripts/:
 # shellcheck disable=SC1090
-# source "${OPS_ENV_FILE:-$REPO/.env}"
+# source "${OPS_ENV_FILE:-$HERE/../../../.env}"
 
 # Target: before any call, check that this helper talks to the system named for it in
 # PLAN.md "## Connections". Compare exactly, never as a substring, and never print the

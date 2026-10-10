@@ -2,8 +2,8 @@
 # ops-task lib, installed by tasks.py init from the ops-task plugin (skills/ops-task/assets/lib/).
 # Edit it in the plugin repo, not here: tasks.py init overwrites this file.
 # Purpose: with_timeout, a time limit for one command and every process it starts.
-# Usage:   source tasks/lib/with_timeout.sh; TIMEOUT=60; with_timeout govc about
-#          tasks/lib/with_timeout.sh --test     run the self-tests
+# Usage:   source "$LIB/with_timeout.sh"; TIMEOUT=60; with_timeout govc about   (LIB is <ops-dir>/tasks/lib)
+#          <ops-dir>/tasks/lib/with_timeout.sh --test     run the self-tests
 # Effect:  read-only. The self-tests start and stop local sleep and cat processes only.
 # Runs on: the Mac, with bash 3.2 or later (macOS /bin/bash and Homebrew bash).
 # Exit:    the command's exit code, or 124 when the time limit was hit.

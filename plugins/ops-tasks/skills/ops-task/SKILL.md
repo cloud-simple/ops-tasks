@@ -1,7 +1,7 @@
 ---
 name: ops-task
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/tasks.py *)
-description: Create, plan, run and record infrastructure operations tasks kept as tasks/NN-slug/ folders with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script under tasks/, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
+description: Create, plan, run and record infrastructure operations tasks kept as NN-slug/ folders in <ops-dir>/tasks/ (<ops-dir> is ops by default) with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script in a task folder, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
 ---
 
 # Operations tasks
@@ -9,20 +9,25 @@ description: Create, plan, run and record infrastructure operations tasks kept a
 Each operations task lives in one folder with the same three parts.
 
 ```
-.env                 settings and credentials of the default connection; created by the user, git-ignored
-tasks/
-  NN-slug/
-    TODO.md          problem, ideas, status
-    PLAN.md          steps with exact commands, checks and results
-    scripts/         optional: exists once the task has a helper
-      NN-verb-object.sh          helper, numbered by creation order in this task
-      tests/NN-verb-object.json  offline test cases for the helper
-      tests/testdata/            fake fixtures for the tests
-    out/             captured state, one folder per run (git-ignored)
-  lib/               installed from this skill's assets/lib/ by `tasks.py init`; edit the skill, not this copy
-    stubtest.py      shared offline test runner for the helpers
-    with_timeout.sh  shared time limit for one command and every process it starts
+<ops-dir>/
+  .ops-task            empty marker: this folder holds tasks/ and the .env* files
+  .env                 settings and credentials of the default connection; created by the user, git-ignored
+  tasks/
+    NN-slug/
+      TODO.md          problem, ideas, status
+      PLAN.md          steps with exact commands, checks and results
+      scripts/         optional: exists once the task has a helper
+        NN-verb-object.sh          helper, numbered by creation order in this task
+        tests/NN-verb-object.json  offline test cases for the helper
+        tests/testdata/            fake fixtures for the tests
+      out/             captured state, one folder per run (git-ignored)
+    lib/               installed from this skill's assets/lib/ by `tasks.py init`; edit the skill, not this copy
+      stubtest.py      shared offline test runner for the helpers
+      with_timeout.sh  shared time limit for one command and every process it starts
 ```
+
+- `<ops-dir>` is the folder with the marker, `ops` by default: `ops/` if `ops/.ops-task` exists, else the first folder in the repo root, sorted by name, that holds `.ops-task`. The repo root is the git top-level folder. The paths in this skill use `<ops-dir>/`. To use another folder: `tasks.py init --dir infra`. `init` never takes over a folder that exists without the marker, because it may belong to the project. When `init` stops for that reason, ask the user: use a new folder (`init --dir <name>`), or mark the existing one. Never create the marker in an existing folder without the user's confirmation.
+- The env files are `<ops-dir>/.env*`, all git-ignored. Each helper's Connections entry names the one it loads.
 
 - `NN` is two digits, the next free number. `slug` is lowercase words joined by hyphens.
 - Create each task with `tasks.py new <slug> --title "<Title>"`, not by hand. Commands: see Workflow.
@@ -116,22 +121,23 @@ Rules, and why:
 
 - **Bash only:** `NN-verb-object.sh`, numbered by creation order within the task, first line `#!/usr/bin/env bash`, run directly so the shebang picks the shell. Use `jq` for JSON and `awk` or `sed` for text. Link the helper from every step that uses it.
 - **Header:** `Purpose:`, `Usage:`, `Effect:` (`read-only` or `changes: ...`), `Runs on:`, `Connection:` (the Connections ID) and `Exit:` codes. Template: [assets/script.sh](assets/script.sh).
-- **Connection:** a helper reads settings only from the source its Connections entry names. The repo `.env`, loaded through `${OPS_ENV_FILE:-$REPO/.env}`, holds the default connection; a helper for another connection must not load it, because it would override that connection's settings.
-- **Secrets:** never in `tasks/` (plans, helpers, tests, `out/`). They live in the env file or the password manager named in Connections. Read a typed secret with a hidden prompt; never print it, and never pass it as a command-line argument when the tool has another input (environment variable, standard input, file). A tool that only takes it as an argument is a documented exception: say so in the plan; other local processes can see the argument while the command runs. Never print `.env` or show its values; to see what it holds, list the variable names only (`sed 's/=.*/=<redacted>/' .env`).
+- **Paths:** the template sets `HERE` to the helper's own folder and `LIB` to `<ops-dir>/tasks/lib`, found relative to `HERE`. Use `"$LIB/..."` for the shared files and paths relative to `$HERE` for the rest, never a path from the repo root.
+- **Connection:** a helper reads settings only from the source its Connections entry names. The env file `<ops-dir>/.env`, loaded through `${OPS_ENV_FILE:-$HERE/../../../.env}`, holds the default connection; a helper for another connection must not load it, because it would override that connection's settings.
+- **Secrets:** never in `<ops-dir>/tasks/` (plans, helpers, tests, `out/`). They live in the env file or the password manager named in Connections. Read a typed secret with a hidden prompt; never print it, and never pass it as a command-line argument when the tool has another input (environment variable, standard input, file). A tool that only takes it as an argument is a documented exception: say so in the plan; other local processes can see the argument while the command runs. Never print an env file or show its values; to see what it holds, list the variable names only (`sed 's/=.*/=<redacted>/' <ops-dir>/.env`).
 - **Target:** before any call, check that the helper talks to the system named in its Connections entry, and exit 2 if not. Compare the parsed identifier exactly (host, context, account), never as a substring: `api.example.com.evil.net` contains `api.example.com`. Never print the rejected value. The template shows checks for a URL, an SSH host and a Kubernetes context.
 - **`--test` first:** handle `--test` before loading credentials or any setup.
 - **Dry run by default:** a helper that changes anything prints the exact target and action and changes nothing unless given `--apply`. During `--apply` it checks the preconditions again. Unknown flags exit 2. A dry run can still open sessions or write local files; it only promises no infrastructure change.
-- **Finite:** a time limit on every network call (`source "$REPO/tasks/lib/with_timeout.sh"`, then `with_timeout <tool> ...`, or the tool's own limit such as `curl --max-time`), bounded retries, a non-zero exit on failure, and a printed next step after a failure. Give network calls no stdin (`</dev/null`): a tool that reads it can swallow a typed secret or a loop's list. `with_timeout` kills the command's whole process group, keeps piped input, and returns 124 on timeout. `set -euo pipefail` is a start, not the error handling.
+- **Finite:** a time limit on every network call (`source "$LIB/with_timeout.sh"`, then `with_timeout <tool> ...`, or the tool's own limit such as `curl --max-time`), bounded retries, a non-zero exit on failure, and a printed next step after a failure. Give network calls no stdin (`</dev/null`): a tool that reads it can swallow a typed secret or a loop's list. `with_timeout` kills the command's whole process group, keeps piped input, and returns 124 on timeout. `set -euo pipefail` is a start, not the error handling.
 - **Loops:** read a list on its own descriptor (`while read -r x <&3; do ...; done 3<<<"$list"`), so a command inside the loop cannot eat the list.
 - **Diagnostics:** a read-only checker runs every section, prints `ERROR: ...` for each failed read, and exits 1 at the end if anything failed. A value that was read and is bad (for example health `red`) is data, not a failed read.
-- **Evidence:** write captured state to a new folder per run, `tasks/NN-slug/out/$(date +%Y%m%dT%H%M%S)/`. Set it once per session and reuse it for before/after files.
+- **Evidence:** write captured state to a new folder per run, `<ops-dir>/tasks/NN-slug/out/$(date +%Y%m%dT%H%M%S)/`. Set it once per session and reuse it for before/after files.
 - **No hidden network paths:** never call a network tool by absolute path (`/usr/bin/curl`) and never use `/dev/tcp`; both bypass the test stubs, and `lint` rejects them.
 
 ### Testing helpers
 
 Every helper supports `--test`. It runs offline self-tests, prints one `PASS <case>` or `FAIL <case>: <reason>` line per case, and exits non-zero if any case fails.
 
-A helper's `--test` runs `tasks/lib/stubtest.py`: it runs the real helper once per case from `scripts/tests/<helper>.json`, with a fake `.env`, stubbed commands that record every call, and no other network tools on `PATH`. It is a controlled test environment, not a network sandbox. The environment rules and the tests file format are in the runner's header ([assets/lib/stubtest.py](assets/lib/stubtest.py)).
+A helper's `--test` runs `<ops-dir>/tasks/lib/stubtest.py`: it runs the real helper once per case from `scripts/tests/<helper>.json`, with a fake env file, stubbed commands that record every call, and no other network tools on `PATH`. It is a controlled test environment, not a network sandbox. The environment rules and the tests file format are in the runner's header ([assets/lib/stubtest.py](assets/lib/stubtest.py)).
 
 Cover these cases, scaled by the kind of helper:
 
@@ -146,7 +152,7 @@ To change the shared library: edit `skills/ops-task/assets/lib/` in the plugin r
 
 ## Workflow
 
-0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `tasks/lib/`, lists what changed), `tasks.py lint --run-tests`, then commit `tasks/lib/`. The user creates `.env` with the default connection's settings and credentials; it must be listed in `.gitignore`.
+0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `<ops-dir>/tasks/lib/`, lists what changed, adds `/<ops-dir>/tasks/*/out/` and `/<ops-dir>/.env*` to `.gitignore` when missing), `tasks.py lint --run-tests`, then commit `<ops-dir>/.ops-task` and `<ops-dir>/tasks/lib/`. Without a marker, `init` creates `ops/.ops-task` at the git top level; outside git it stops with an error. The user creates `<ops-dir>/.env` with the default connection's settings and credentials.
 1. **New task:** `tasks.py new <slug>`. Fill in TODO.md: the problem and the ideas. Status `open`.
    - Problem, impact, deadline, owners and constraints come from the user; ask when any of them is unclear, do not guess.
    - Ideas come from your knowledge and from documentation, each with its trade-off and, where possible, a link. The user marks an idea **Chosen** or **Rejected**; until then it stays **Open**.
@@ -156,13 +162,14 @@ To change the shared library: edit `skills/ops-task/assets/lib/` in the plugin r
 5. **Before committing:** run the checks and fix every error.
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/tasks.py init                 # install or update tasks/lib/ (overwrites it)
+${CLAUDE_SKILL_DIR}/scripts/tasks.py init                 # install or update <ops-dir>/tasks/lib/ (overwrites it)
+${CLAUDE_SKILL_DIR}/scripts/tasks.py init --dir infra     # first init with infra/ as <ops-dir> instead of default ops/
 ${CLAUDE_SKILL_DIR}/scripts/tasks.py status               # status, deadline, checkbox counts
-${CLAUDE_SKILL_DIR}/scripts/tasks.py lint                 # structure, links, secrets, helpers, tasks/lib/
-${CLAUDE_SKILL_DIR}/scripts/tasks.py lint --run-tests     # also run the tests of tasks/lib/ and every helper
+${CLAUDE_SKILL_DIR}/scripts/tasks.py lint                 # structure, links, secrets, helpers, lib/, env files ignored
+${CLAUDE_SKILL_DIR}/scripts/tasks.py lint --run-tests     # also run the tests of lib/ and every helper
 ${CLAUDE_SKILL_DIR}/scripts/tasks.py --test               # the tool's own tests
 ```
 
 `status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.
 
-`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, and that `tasks/lib/` matches the skill. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, or that tests are offline and useful; `--run-tests` runs the tests, and review does the rest.
+`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, or that tests are offline and useful; `--run-tests` runs the tests, and review does the rest.

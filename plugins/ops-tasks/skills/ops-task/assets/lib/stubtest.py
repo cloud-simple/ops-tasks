@@ -12,10 +12,10 @@ Exit:    0 all cases passed, 1 a case failed, 2 wrong arguments.
 
 A helper calls this runner from its own `--test` flag, before any other setup:
 
-    if [[ "${1:-}" == "--test" ]]; then exec python3 "$REPO/tasks/lib/stubtest.py" "$0"; fi
+    if [[ "${1:-}" == "--test" ]]; then exec python3 "$LIB/stubtest.py" "$0"; fi
 
-The cases for `tasks/NN-slug/scripts/01-check-state.sh` live in
-`tasks/NN-slug/scripts/tests/01-check-state.json`:
+The cases for `<ops-dir>/tasks/NN-slug/scripts/01-check-state.sh` live in
+`<ops-dir>/tasks/NN-slug/scripts/tests/01-check-state.json`:
 
     {
       "allow": ["jq", "base64"],            # optional tools from OPTIONAL_ALLOW
