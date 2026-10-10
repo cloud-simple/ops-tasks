@@ -12,9 +12,11 @@ Task: [TODO.md](TODO.md). Facts checked on {{DATE}}.
 
 ## Connections
 
-| ID | System | Settings from | Credentials from | Used by |
+| ID | Kind | Target | Settings and credentials from | Allowed actions |
 |---|---|---|---|---|
-| <id> | <system and address> | <env file and variable names, or "typed in step N.M"> | <env file variable, or "hidden prompt, from the password manager"> | <terminal, helper> |
+| <id> | <system, repo or pipeline> | <exact identity: host, API URL or cluster context; hosting project; pipeline project, job and environment> | <env file and variable names, "hidden prompt, from the password manager", or "typed in step N.M"> | <what the user authorized, with scope: read; push branch ops/NN-slug; open MR; run job deploy for revision X> |
+
+Managed systems: <for each system whose state a repo declares: which repo declares which part, and which pipeline applies it; or "unknown">.
 
 ## Stop conditions
 
@@ -37,6 +39,8 @@ Task: [TODO.md](TODO.md). Facts checked on {{DATE}}.
   Expected: <observable result>. When ticked, add under the item: `Result (YYYY-MM-DD): <measured values>`.
 
 ### 1.2 <Step that changes infrastructure>
+
+Uses: <Connections IDs; optional, for a step whose target is easy to confuse>
 
 <Why this step exists, in one sentence.>
 

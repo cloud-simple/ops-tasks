@@ -37,6 +37,9 @@ What lint checks, and what it cannot prove:
 - PLAN.md: unique step IDs `N.M` matching their `## Phase N`, an "After check passed" box in every
   step with a `**Do:**` part, and code blocks fenced as `bash` (or another named language).
 - <ops-dir>/tasks/lib/ matches the skill's assets/lib/.
+- PLAN.md "## Connections": the table columns, unique IDs and Kind (system, repo, pipeline); the IDs
+  in `Uses:` lines and in helper `Connection:` headers exist in that table. Placeholder rows and IDs
+  that start with '<' are skipped. It cannot check authorization or that a step uses the right target.
 - The env files are ignored by git, or /<ops-dir>/.env* is in .gitignore when none exists yet.
 - Helpers: bash only (`NN-verb-object.sh`, first line `#!/usr/bin/env bash`), the executable bit,
   header fields, a `--test` branch, a tests file, and no absolute paths to network tools or /dev/tcp.
@@ -82,6 +85,9 @@ CHECKBOX_RE = re.compile(r"^\s*[-*] \[([ xX])\] ")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 HEADER_FIELDS = ("Purpose:", "Usage:", "Effect:", "Runs on:", "Connection:", "Exit:")
 TODO_HEADINGS = ("## Problem", "## Ideas")
+CONNECTION_COLUMNS = ("ID", "Kind", "Target", "Settings and credentials from", "Allowed actions")
+CONNECTION_KINDS = ("system", "repo", "pipeline")
+USES_RE = re.compile(r"^Uses:\s*(.*)$")
 PLAN_HEADINGS = ("## Goal", "## Stop conditions", "## Rollback", "## Log")
 PLAN_NEEDED = {"planned", "in progress", "done"}
 NETWORK_TOOLS = ("curl", "wget", "openssl", "govc", "ssh", "scp", "nc", "dig", "ovftool")
@@ -376,7 +382,59 @@ def lint_waits(path: Path, text: str, rep: Report):
             rep.warn(path, "wait without a limit; use a bounded loop with a timeout message", no)
 
 
-def lint_plan_structure(plan: Path, text: str, rep: Report):
+def split_ids(value: str) -> list:
+    """IDs from 'vc, logsrv' or 'vc (repo .env; note)': the part before '(' or ';', comma-separated.
+    Placeholders that start with '<' are skipped."""
+    value = re.split(r"[(;]", value, maxsplit=1)[0]
+    return [v.strip() for v in value.split(",") if v.strip() and not v.strip().startswith("<")]
+
+
+def lint_connections(plan: Path, text: str, rep: Report):
+    """Check the '## Connections' table. Returns its IDs, or None when the plan has no such section."""
+    rows, in_section, found = [], False, False
+    for no, line in lines_outside_fences(text):
+        if line.startswith("## "):
+            in_section = line.strip() == "## Connections"
+            found = found or in_section
+            continue
+        if in_section and line.lstrip().startswith("|"):
+            rows.append((no, [c.strip() for c in line.strip().strip("|").split("|")]))
+    if not found:
+        return None
+    if not rows:
+        rep.error(plan, "## Connections has no table")
+        return set()
+    (head_no, head), body = rows[0], [r for r in rows[1:] if not all(set(c) <= set(":- ") for c in r[1])]
+    if tuple(head) != CONNECTION_COLUMNS:
+        rep.error(plan, "Connections columns must be: " + " | ".join(CONNECTION_COLUMNS), head_no)
+        return set()
+    ids = {}
+    for no, cells in body:
+        if not cells or cells[0].startswith("<"):
+            continue  # placeholder row from the template
+        if len(cells) != len(CONNECTION_COLUMNS):
+            rep.error(plan, f"Connections row needs {len(CONNECTION_COLUMNS)} cells", no)
+            continue
+        cid, kind = cells[0], cells[1]
+        if cid in ids:
+            rep.error(plan, f"Connections ID '{cid}' is used twice (first on line {ids[cid]})", no)
+        ids.setdefault(cid, no)
+        if kind not in CONNECTION_KINDS:
+            rep.error(plan, f"Connections '{cid}': Kind must be one of {', '.join(CONNECTION_KINDS)}", no)
+    return set(ids)
+
+
+def check_ids(path: Path, where: str, names: list, ids, rep: Report, no=None):
+    for n in names:
+        if n == "none":
+            continue
+        if ids is None:
+            rep.error(path, f"{where} names '{n}', but PLAN.md has no ## Connections table", no)
+        elif ids and n not in ids:
+            rep.error(path, f"{where} names '{n}', which is not an ID in ## Connections", no)
+
+
+def lint_plan_structure(plan: Path, text: str, rep: Report, ids=None):
     """Step IDs, phases, After boxes and fence labels.
 
     Steps live in the execution area: `## Steps` and `## Phase N` sections. Headings elsewhere
@@ -419,6 +477,9 @@ def lint_plan_structure(plan: Path, text: str, rep: Report):
             continue
         if not step:
             continue
+        m = USES_RE.match(line)
+        if m:
+            check_ids(plan, f"step {step['id']}: Uses:", split_ids(m.group(1)), ids, rep, no)
         if line.strip() == "**Do:**":
             step["do"], step["in_after"] = True, False
         elif line.strip().startswith("**After**"):
@@ -503,7 +564,8 @@ def lint_task(task: Path, rep: Report):
             for no, checked in active_checkboxes(text):
                 if not checked:
                     rep.error(plan, "task is done but this checkbox is open; tick it or move it to '## Not used'", no)
-        lint_plan_structure(plan, text, rep)
+        ids = lint_connections(plan, text, rep)
+        lint_plan_structure(plan, text, rep, ids)
         lint_links(plan, text, rep)
         lint_secrets(plan, text, rep)
         lint_waits(plan, text, rep)
@@ -513,6 +575,10 @@ def lint_task(task: Path, rep: Report):
     if scripts.is_dir():
         for s in sorted(p for p in scripts.iterdir() if p.is_file() and not p.name.startswith(".")):
             lint_script(s, rep)
+            if plan.exists() and s.suffix == ".sh":
+                m = re.search(r"^#\s*Connection:\s*(.*)$", "\n".join(s.read_text().splitlines()[:20]), re.M)
+                if m:
+                    check_ids(s, "Connection:", split_ids(m.group(1)), ids, rep)
 
 
 def _kill_session(sid: int) -> str:
@@ -976,6 +1042,34 @@ class SelfTests(unittest.TestCase):
         joined = "\n".join(cmd_lint(self.lay, [], False).errors)
         self.assertIn("stubtest.py: differs from the skill's copy", joined)
         self.assertIn("with_timeout.sh: missing; run tasks.py init", joined)
+
+    def test_connections_table_uses_lines_and_helper_ids(self):
+        t = self.make_good_task()
+        plan = t / "PLAN.md"
+        table = textwrap.dedent("""\
+            ## Connections
+            | ID | Kind | Target | Settings and credentials from | Allowed actions |
+            |---|---|---|---|---|
+            | <id> | <system, repo or pipeline> | <x> | <x> | <x> |
+            | vc | system | vcenter.test.invalid | <ops-dir>/.env | read |
+            | app | repo | gitlab.com/group/app | APP_REPO | read; open MR |
+            | deploy | pipeline | gitlab.com/group/app, job deploy-prod, prod | CI | run deploy-prod |
+            """)
+        base = plan.read_text().replace("## Stop conditions", table + "## Stop conditions")
+        plan.write_text(base.replace("### 1.1 Fix\n", "### 1.1 Fix\n\nUses: vc, app, <placeholder>\n"))
+        self.assertEqual(cmd_lint(self.lay, [], False).errors, [])
+        plan.write_text(base.replace("### 1.1 Fix\n", "### 1.1 Fix\n\nUses: staging\n")
+                        .replace("| app | repo |", "| vc | repo |").replace("| pipeline |", "| ci |"))
+        joined = "\n".join(cmd_lint(self.lay, [], False).errors)
+        self.assertIn("step 1.1: Uses: names 'staging', which is not an ID", joined)
+        self.assertIn("Connections ID 'vc' is used twice", joined)
+        self.assertIn("Connections 'deploy': Kind must be one of system, repo, pipeline", joined)
+        plan.write_text(base)
+        helper = t / "scripts" / "01-check-demo.sh"
+        helper.write_text(helper.read_text().replace("# Connection: none", "# Connection: vc, prod (see PLAN.md)"))
+        self.assertIn("Connection: names 'prod'", "\n".join(cmd_lint(self.lay, [], False).errors))
+        plan.write_text(base.replace("| Settings and credentials from |", "| Settings from |"))
+        self.assertIn("Connections columns must be", "\n".join(cmd_lint(self.lay, [], False).errors))
 
     def test_helpers_must_be_bash_with_the_bash_shebang(self):
         t = self.make_good_task()
