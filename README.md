@@ -90,9 +90,12 @@ claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its 
 
 To release:
 
-1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json`, commit, and merge to `main`.
-2. On a clean `main`, run `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json`
-   and the marketplace entry agree, then creates and pushes the tag `ops-tasks--v<version>`.
+1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json`, commit, and get it onto
+   `origin/main`: merge the pull request, or after a local merge run `git push origin main`.
+   Installs read the plugin from `origin/main`, so a version that is only local is not released.
+2. Update the local `main` to `origin/main`. On that clean `main`, run
+   `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
+   entry agree, then creates and pushes only the tag `ops-tasks--v<version>`.
 
 Installed copies update only when the version changes. After a change to `assets/lib/`, run
 `tasks.py init` in each repo that uses the skill and commit its `<ops-dir>/tasks/lib/`.
