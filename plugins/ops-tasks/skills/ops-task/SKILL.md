@@ -161,7 +161,7 @@ Cover these cases, scaled by the kind of helper:
 
 Fixtures must use fake names, addresses and credentials (`*.test.invalid`, `not-a-real-password`).
 
-To change the shared library: edit `skills/ops-task/assets/lib/` in the plugin repo, not the installed copy, run its tests there (`python3 skills/ops-task/assets/lib/stubtest.py --test`, `bash skills/ops-task/assets/lib/with_timeout.sh --test`), release the plugin, then follow Workflow step 0 in each repo.
+To change the shared library: edit `plugins/ops-tasks/skills/ops-task/assets/lib/` in the plugin repo `cloud-simple/ops-tasks`, not the installed copy, run its tests there (`plugins/ops-tasks/skills/ops-task/assets/lib/stubtest.py --test`, `plugins/ops-tasks/skills/ops-task/assets/lib/with_timeout.sh --test`), release the plugin, then follow Workflow step 0 in each repo.
 
 ## Workflow
 

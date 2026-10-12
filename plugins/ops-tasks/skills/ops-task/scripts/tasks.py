@@ -273,7 +273,7 @@ def cmd_init(lay: Layout) -> list:
     created = not lay.marker.exists()
     if created:
         lay.marker.touch()
-    lines = [f"{lay.rel(lib)}/ is installed from the ops-task plugin (skills/ops-task/assets/lib/) and is overwritten on every init.",
+    lines = [f"{lay.rel(lib)}/ is installed from the ops-tasks plugin (cloud-simple/ops-tasks, plugins/ops-tasks/skills/ops-task/assets/lib/) and is overwritten on every init.",
              f"Changes made by hand in {lay.rel(lib)}/ are lost; make them in the plugin repo instead."]
     if created:
         lines.append(f"  created:     {lay.rel(lay.marker)} (marks {lay.ops_dir}/ as the folder for tasks/ and .env*)")
