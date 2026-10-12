@@ -1,0 +1,16 @@
+{
+  "name": "ops-tasks",
+  "owner": {
+    "name": "cloud-simple"
+  },
+  "metadata": {
+    "description": "Claude Code plugin for infrastructure operations tasks kept as folders with a problem, a checked plan and tested helper scripts"
+  },
+  "plugins": [
+    {
+      "name": "ops-tasks",
+      "source": "./plugins/ops-tasks",
+      "description": "Operations tasks as <ops-dir>/tasks/NN-slug/ folders: TODO.md (problem and ideas), PLAN.md (steps with exact commands, before and after checks, recorded results) and scripts/ (numbered bash helpers with offline tests)"
+    }
+  ]
+}
