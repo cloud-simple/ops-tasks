@@ -84,9 +84,15 @@ S=plugins/ops-tasks/skills/ops-tasks
 $S/scripts/tasks.py --test
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
-claude plugin validate .
+claude plugin validate .                          # the marketplace manifest only
+claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
 ```
 
-To release, raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json` and push to `main`.
+To release:
+
+1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json`, commit, and merge to `main`.
+2. On a clean `main`, run `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json`
+   and the marketplace entry agree, then creates and pushes the tag `ops-tasks--v<version>`.
+
 Installed copies update only when the version changes. After a change to `assets/lib/`, run
 `tasks.py init` in each repo that uses the skill and commit its `<ops-dir>/tasks/lib/`.
