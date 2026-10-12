@@ -18,8 +18,6 @@ On older versions, add the marketplace first:
 /plugin install ops-tasks@ops-tasks
 ```
 
-The repo is private: the machine needs read access to `github.com/cloud-simple/ops-tasks`.
-
 ## What a task looks like
 
 ```
@@ -76,6 +74,9 @@ plugins/ops-tasks/
 
 ## Develop
 
+`main` is protected: every change reaches it through a pull request with a squash merge. Direct
+pushes, force pushes and deleting `main` are refused.
+
 Run all tests before each commit. They need Python 3.9 or later, bash 3.2 or later and git, and make
 no network calls.
 
@@ -90,9 +91,9 @@ claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its 
 
 To release:
 
-1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json`, commit, and get it onto
-   `origin/main`: merge the pull request, or after a local merge run `git push origin main`.
-   Installs read the plugin from `origin/main`, so a version that is only local is not released.
+1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json` in the pull request, and
+   squash-merge it. Installs read the plugin from `origin/main`, so a version that is not merged
+   is not released.
 2. Update the local `main` to `origin/main`. On that clean `main`, run
    `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
    entry agree, then creates and pushes only the tag `ops-tasks--v<version>`.
