@@ -88,6 +88,7 @@ TODO_HEADINGS = ("## Problem", "## Ideas")
 CONNECTION_COLUMNS = ("ID", "Kind", "Target", "Settings and credentials from", "Allowed actions")
 CONNECTION_KINDS = ("system", "repo", "pipeline")
 USES_RE = re.compile(r"^Uses:\s*(.*)$")
+TABLE_BROKEN = object()  # the Connections table has an error of its own: skip the ID checks
 PLAN_HEADINGS = ("## Goal", "## Stop conditions", "## Rollback", "## Log")
 PLAN_NEEDED = {"planned", "in progress", "done"}
 NETWORK_TOOLS = ("curl", "wget", "openssl", "govc", "ssh", "scp", "nc", "dig", "ovftool")
@@ -390,7 +391,8 @@ def split_ids(value: str) -> list:
 
 
 def lint_connections(plan: Path, text: str, rep: Report):
-    """Check the '## Connections' table. Returns its IDs, or None when the plan has no such section."""
+    """Check the '## Connections' table. Returns its IDs, None when the plan has no such section,
+    or TABLE_BROKEN when the table is missing or has the wrong columns (already reported)."""
     rows, in_section, found = [], False, False
     for no, line in lines_outside_fences(text):
         if line.startswith("## "):
@@ -403,11 +405,11 @@ def lint_connections(plan: Path, text: str, rep: Report):
         return None
     if not rows:
         rep.error(plan, "## Connections has no table")
-        return set()
+        return TABLE_BROKEN
     (head_no, head), body = rows[0], [r for r in rows[1:] if not all(set(c) <= set(":- ") for c in r[1])]
     if tuple(head) != CONNECTION_COLUMNS:
         rep.error(plan, "Connections columns must be: " + " | ".join(CONNECTION_COLUMNS), head_no)
-        return set()
+        return TABLE_BROKEN
     ids = {}
     for no, cells in body:
         if not cells or cells[0].startswith("<"):
@@ -425,12 +427,14 @@ def lint_connections(plan: Path, text: str, rep: Report):
 
 
 def check_ids(path: Path, where: str, names: list, ids, rep: Report, no=None):
+    if ids is TABLE_BROKEN:
+        return
     for n in names:
         if n == "none":
             continue
         if ids is None:
             rep.error(path, f"{where} names '{n}', but PLAN.md has no ## Connections table", no)
-        elif ids and n not in ids:
+        elif n not in ids:
             rep.error(path, f"{where} names '{n}', which is not an ID in ## Connections", no)
 
 
@@ -1069,7 +1073,26 @@ class SelfTests(unittest.TestCase):
         helper.write_text(helper.read_text().replace("# Connection: none", "# Connection: vc, prod (see PLAN.md)"))
         self.assertIn("Connection: names 'prod'", "\n".join(cmd_lint(self.lay, [], False).errors))
         plan.write_text(base.replace("| Settings and credentials from |", "| Settings from |"))
-        self.assertIn("Connections columns must be", "\n".join(cmd_lint(self.lay, [], False).errors))
+        joined = "\n".join(cmd_lint(self.lay, [], False).errors)
+        self.assertIn("Connections columns must be", joined)
+        self.assertNotIn("names 'prod'", joined)  # a broken table is reported once, without follow-on ID errors
+
+    def test_ids_are_checked_when_the_table_has_only_placeholders(self):
+        t = self.make_good_task()
+        plan = t / "PLAN.md"
+        table = textwrap.dedent("""\
+            ## Connections
+            | ID | Kind | Target | Settings and credentials from | Allowed actions |
+            |---|---|---|---|---|
+            | <id> | <system, repo or pipeline> | <x> | <x> | <x> |
+            """)
+        plan.write_text(plan.read_text().replace("## Stop conditions", table + "## Stop conditions")
+                        .replace("### 1.1 Fix\n", "### 1.1 Fix\n\nUses: prod\n"))
+        helper = t / "scripts" / "01-check-demo.sh"
+        helper.write_text(helper.read_text().replace("# Connection: none", "# Connection: prod"))
+        joined = "\n".join(cmd_lint(self.lay, [], False).errors)
+        self.assertIn("step 1.1: Uses: names 'prod', which is not an ID", joined)
+        self.assertIn("Connection: names 'prod', which is not an ID", joined)
 
     def test_helpers_must_be_bash_with_the_bash_shebang(self):
         t = self.make_good_task()
