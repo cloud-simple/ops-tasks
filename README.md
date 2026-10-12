@@ -18,6 +18,27 @@ On older versions, add the marketplace first:
 /plugin install ops-tasks@ops-tasks
 ```
 
+From the command line, outside a Claude Code session:
+
+```bash
+claude plugin install ops-tasks --marketplace cloud-simple/ops-tasks
+```
+
+This adds the marketplace when it is missing, then installs the plugin for the current user. Add
+`--scope project` to record the install in the repo's `.claude/settings.json` instead, so the team
+gets the plugin with the checkout. The two-step form also works:
+
+```bash
+claude plugin marketplace add cloud-simple/ops-tasks
+claude plugin install ops-tasks@ops-tasks
+```
+
+Restart Claude Code after the install. To update later:
+
+```bash
+claude plugin update ops-tasks@ops-tasks
+```
+
 ## What a task looks like
 
 ```
