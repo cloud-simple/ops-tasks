@@ -1,7 +1,7 @@
 # ops-tasks
 
 A Claude Code plugin for infrastructure operations tasks. Each task is a folder with the problem, a
-checked plan and tested helper scripts. The plugin holds one skill, `ops-task`.
+checked plan and tested helper scripts. The plugin holds one skill, `ops-tasks`.
 
 ## Install
 
@@ -24,7 +24,7 @@ The repo is private: the machine needs read access to `github.com/cloud-simple/o
 
 ```
 <ops-dir>/                 ops/ by default
-  .ops-task                empty marker: this folder holds tasks/ and the .env* files
+  .ops-tasks               empty marker: this folder holds tasks/ and the .env* files
   .env                     settings and credentials, created by the user, git-ignored
   tasks/
     lib/                   shared test library, installed by `tasks.py init`
@@ -34,19 +34,19 @@ The repo is private: the machine needs read access to `github.com/cloud-simple/o
       scripts/             optional: numbered bash helpers, each with an offline --test
 ```
 
-`<ops-dir>` is `ops/` when `ops/.ops-task` exists, else the first folder in the repo root, sorted by
-name, that holds `.ops-task`. The skill works only inside a git repo.
+`<ops-dir>` is `ops/` when `ops/.ops-tasks` exists, else the first folder in the repo root, sorted by
+name, that holds `.ops-tasks`. The skill works only inside a git repo.
 
 ## Use
 
 Ask Claude to start an operations task, write a plan or runbook, record a step that was done, add a
 helper, or show the status of the tasks. The skill triggers on these requests without being named.
 
-In a new repo, the first run is `tasks.py init`. It creates `ops/.ops-task` (or `NAME/.ops-task` with
+In a new repo, the first run is `tasks.py init`. It creates `ops/.ops-tasks` (or `NAME/.ops-tasks` with
 `--dir NAME`), installs `<ops-dir>/tasks/lib/`, and adds `/<ops-dir>/tasks/*/out/` and
 `/<ops-dir>/.env*` to `.gitignore`. It stops when the folder exists without the marker, because the
 folder may belong to the project; create the marker there yourself only if the folder is meant for
-tasks. Commit `<ops-dir>/.ops-task` and `<ops-dir>/tasks/lib/` afterwards.
+tasks. Commit `<ops-dir>/.ops-tasks` and `<ops-dir>/tasks/lib/` afterwards.
 
 Claude runs `tasks.py` from the installed plugin as `${CLAUDE_SKILL_DIR}/scripts/tasks.py`:
 
@@ -67,7 +67,7 @@ authorized, or that a step uses the right target; review does that.
 .claude-plugin/marketplace.json            the ops-tasks marketplace
 plugins/ops-tasks/
   .claude-plugin/plugin.json               the plugin manifest and its version
-  skills/ops-task/
+  skills/ops-tasks/
     SKILL.md                               the rules Claude follows
     scripts/tasks.py                       init, new, status, lint
     assets/                                TODO.md, PLAN.md and script.sh templates
@@ -80,7 +80,7 @@ Run all tests before each commit. They need Python 3.9 or later, bash 3.2 or lat
 no network calls.
 
 ```bash
-S=plugins/ops-tasks/skills/ops-task
+S=plugins/ops-tasks/skills/ops-tasks
 $S/scripts/tasks.py --test
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test

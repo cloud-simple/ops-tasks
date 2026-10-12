@@ -1,5 +1,5 @@
 ---
-name: ops-task
+name: ops-tasks
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/tasks.py *)
 description: Create, plan, run and record infrastructure operations tasks kept as NN-slug/ folders in <ops-dir>/tasks/ (<ops-dir> is ops by default) with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script in a task folder, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
 ---
@@ -10,7 +10,7 @@ Each operations task lives in one folder with the same three parts.
 
 ```
 <ops-dir>/
-  .ops-task            empty marker: this folder holds tasks/ and the .env* files
+  .ops-tasks           empty marker: this folder holds tasks/ and the .env* files
   .env                 settings and credentials of the default connection; created by the user, git-ignored
   tasks/
     NN-slug/
@@ -26,7 +26,7 @@ Each operations task lives in one folder with the same three parts.
       with_timeout.sh  shared time limit for one command and every process it starts
 ```
 
-- `<ops-dir>` is the folder with the marker, `ops` by default: `ops/` if `ops/.ops-task` exists, else the first folder in the repo root, sorted by name, that holds `.ops-task`. The repo root is the git top-level folder. The paths in this skill use `<ops-dir>/`. To use another folder: `tasks.py init --dir infra`. `init` never takes over a folder that exists without the marker, because it may belong to the project. When `init` stops for that reason, ask the user: use a new folder (`init --dir <name>`), or mark the existing one. Never create the marker in an existing folder without the user's confirmation.
+- `<ops-dir>` is the folder with the marker, `ops` by default: `ops/` if `ops/.ops-tasks` exists, else the first folder in the repo root, sorted by name, that holds `.ops-tasks`. The repo root is the git top-level folder. The paths in this skill use `<ops-dir>/`. To use another folder: `tasks.py init --dir infra`. `init` never takes over a folder that exists without the marker, because it may belong to the project. When `init` stops for that reason, ask the user: use a new folder (`init --dir <name>`), or mark the existing one. Never create the marker in an existing folder without the user's confirmation.
 - The env files are `<ops-dir>/.env*`, all git-ignored. Each helper's Connections entry names the one it loads.
 
 - `NN` is two digits, the next free number. `slug` is lowercase words joined by hyphens.
@@ -161,11 +161,11 @@ Cover these cases, scaled by the kind of helper:
 
 Fixtures must use fake names, addresses and credentials (`*.test.invalid`, `not-a-real-password`).
 
-To change the shared library: edit `plugins/ops-tasks/skills/ops-task/assets/lib/` in the plugin repo `cloud-simple/ops-tasks`, not the installed copy, run its tests there (`plugins/ops-tasks/skills/ops-task/assets/lib/stubtest.py --test`, `plugins/ops-tasks/skills/ops-task/assets/lib/with_timeout.sh --test`), release the plugin, then follow Workflow step 0 in each repo.
+To change the shared library: edit `plugins/ops-tasks/skills/ops-tasks/assets/lib/` in the plugin repo `cloud-simple/ops-tasks`, not the installed copy, run its tests there (`plugins/ops-tasks/skills/ops-tasks/assets/lib/stubtest.py --test`, `plugins/ops-tasks/skills/ops-tasks/assets/lib/with_timeout.sh --test`), release the plugin, then follow Workflow step 0 in each repo.
 
 ## Workflow
 
-0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `<ops-dir>/tasks/lib/`, lists what changed, adds `/<ops-dir>/tasks/*/out/` and `/<ops-dir>/.env*` to `.gitignore` when missing), `tasks.py lint --run-tests`, then commit `<ops-dir>/.ops-task` and `<ops-dir>/tasks/lib/`. Without a marker, `init` creates `ops/.ops-task` at the git top level; outside git it stops with an error. The user creates `<ops-dir>/.env` with the default connection's settings and credentials.
+0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `<ops-dir>/tasks/lib/`, lists what changed, adds `/<ops-dir>/tasks/*/out/` and `/<ops-dir>/.env*` to `.gitignore` when missing), `tasks.py lint --run-tests`, then commit `<ops-dir>/.ops-tasks` and `<ops-dir>/tasks/lib/`. Without a marker, `init` creates `ops/.ops-tasks` at the git top level; outside git it stops with an error. The user creates `<ops-dir>/.env` with the default connection's settings and credentials.
 1. **New task:** `tasks.py new <slug>`. Fill in TODO.md: the problem and the ideas. Status `open`.
    - Problem, impact, deadline, owners and constraints come from the user; ask when any of them is unclear, do not guess.
    - Ideas come from your knowledge and from documentation, each with its trade-off and, where possible, a link. The user marks an idea **Chosen** or **Rejected**; until then it stays **Open**.

@@ -9,7 +9,7 @@ Usage:   tasks.py [--root DIR] init [--dir NAME]         install or update <ops-
                                                          check structure; --run-tests also runs every
                                                          helper's --test and the shared test runner
          tasks.py --test                                 run this tool's own self-tests
-Effect:  `init` creates <ops-dir>/.ops-task when no marker exists, overwrites <ops-dir>/tasks/lib/, and adds
+Effect:  `init` creates <ops-dir>/.ops-tasks when no marker exists, overwrites <ops-dir>/tasks/lib/, and adds
          /<ops-dir>/tasks/*/out/ and /<ops-dir>/.env* to .gitignore when missing. `new` writes one new
          folder (and runs `init` when <ops-dir>/tasks/lib/ is missing). `status` and `lint` only read.
          `lint --run-tests` runs the offline tests of <ops-dir>/tasks/lib/ and of the helpers.
@@ -18,9 +18,9 @@ Runs on: any machine with Python 3.9 or later. Standard library only.
 Where things are:
 - The repo root is the git top-level folder of the working directory, or the folder given with --root.
   Outside git, every command stops unless --root is given.
-- <ops-dir> is the folder that holds the empty marker file `.ops-task`, `ops` by default: `ops/` if
-  `ops/.ops-task` exists, else the first folder in the repo root, sorted by name, that holds `.ops-task`.
-  Without any marker, `init` creates `ops/.ops-task`, or NAME/.ops-task with --dir NAME; the other
+- <ops-dir> is the folder that holds the empty marker file `.ops-tasks`, `ops` by default: `ops/` if
+  `ops/.ops-tasks` exists, else the first folder in the repo root, sorted by name, that holds `.ops-tasks`.
+  Without any marker, `init` creates `ops/.ops-tasks`, or NAME/.ops-tasks with --dir NAME; the other
   commands stop.
 - `init` never takes over a folder that exists without the marker (it may belong to the project), and
   `init --dir NAME` stops when the marker is in another folder: later commands would use that one.
@@ -67,7 +67,7 @@ ASSETS = SKILL_DIR / "assets"
 LIB_FILES = ("stubtest.py", "with_timeout.sh")
 BASH_SHEBANG = "#!/usr/bin/env bash"
 DEFAULT_OPS_DIR = "ops"
-MARKER = ".ops-task"
+MARKER = ".ops-tasks"
 
 TASK_DIR_RE = re.compile(r"^(\d{2,3})-([a-z0-9]+(?:-[a-z0-9]+)*)$")
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -273,7 +273,7 @@ def cmd_init(lay: Layout) -> list:
     created = not lay.marker.exists()
     if created:
         lay.marker.touch()
-    lines = [f"{lay.rel(lib)}/ is installed from the ops-tasks plugin (cloud-simple/ops-tasks, plugins/ops-tasks/skills/ops-task/assets/lib/) and is overwritten on every init.",
+    lines = [f"{lay.rel(lib)}/ is installed from the ops-tasks plugin (cloud-simple/ops-tasks, plugins/ops-tasks/skills/ops-tasks/assets/lib/) and is overwritten on every init.",
              f"Changes made by hand in {lay.rel(lib)}/ are lost; make them in the plugin repo instead."]
     if created:
         lines.append(f"  created:     {lay.rel(lay.marker)} (marks {lay.ops_dir}/ as the folder for tasks/ and .env*)")
@@ -783,7 +783,7 @@ class SelfTests(unittest.TestCase):
         self.assertEqual(init_layout(self.root, "ops").ops_dir, "ops")
         with self.assertRaises(SystemExit) as ctx:
             init_layout(self.root, "infra")  # the marker is in ops/
-        self.assertIn("already in ops/.ops-task", str(ctx.exception))
+        self.assertIn("already in ops/.ops-tasks", str(ctx.exception))
         for bad in ("", ".", "..", ".git", "a/b", "/abs"):
             with self.assertRaises(SystemExit):
                 init_layout(self.root, bad)
@@ -1011,7 +1011,7 @@ class SelfTests(unittest.TestCase):
                     main(["status"])
             finally:
                 os.chdir(old_cwd)
-            self.assertIn("holds the marker .ops-task", str(ctx.exception))
+            self.assertIn("holds the marker .ops-tasks", str(ctx.exception))
 
     def test_first_init_outside_git_stops(self):
         with tempfile.TemporaryDirectory(prefix="tasks-py-nogit-") as tmp:
