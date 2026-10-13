@@ -1,7 +1,6 @@
 ---
 name: ops-tasks
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/tasks.py *)
-description: Create, plan, run and record infrastructure operations tasks kept as NN-slug/ folders in <ops-dir>/tasks/ (<ops-dir> is ops by default) with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script in a task folder, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
+description: Create, plan, run and record infrastructure operations tasks kept as NN-slug/ folders under an operations directory (ops/ by default) with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script in a task folder, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
 ---
 
 # Operations tasks
@@ -31,7 +30,7 @@ Each operations task lives in one folder with the same three parts.
 
 - `NN` is two digits, the next free number. `slug` is lowercase words joined by hyphens.
 - Create each task with `tasks.py new <slug> --title "<Title>"`, not by hand. Commands: see Workflow.
-- `tasks.py` means `${CLAUDE_SKILL_DIR}/scripts/tasks.py`. Run it directly, not through `python3`, so the `allowed-tools` rule above matches; it covers only the turn that invokes this skill. Never write that path into a repo: it changes with every plugin version.
+- Resolve `scripts/tasks.py` from the directory containing this loaded `SKILL.md`. Run it directly by its absolute path. Quote the path in shell commands. Keep the working directory in the user's repo so it finds the right git root. In command examples, `tasks.py` means that absolute path; it is not a command on `PATH`. Never save the installed skill path in repo files: it changes with every plugin version.
 - Write in plain language: short sentences, active voice, one term per item, `must` for requirements.
 
 ## TODO.md: the problem and the ideas
@@ -175,12 +174,12 @@ To change the shared library: edit `plugins/ops-tasks/skills/ops-tasks/assets/li
 5. **Before committing:** run the checks and fix every error.
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/tasks.py init                 # install or update <ops-dir>/tasks/lib/ (overwrites it)
-${CLAUDE_SKILL_DIR}/scripts/tasks.py init --dir infra     # first init with infra/ as <ops-dir> instead of default ops/
-${CLAUDE_SKILL_DIR}/scripts/tasks.py status               # status, deadline, checkbox counts
-${CLAUDE_SKILL_DIR}/scripts/tasks.py lint                 # structure, links, secrets, helpers, lib/, env files ignored
-${CLAUDE_SKILL_DIR}/scripts/tasks.py lint --run-tests     # also run the tests of lib/ and every helper
-${CLAUDE_SKILL_DIR}/scripts/tasks.py --test               # the tool's own tests
+tasks.py init                 # install or update <ops-dir>/tasks/lib/ (overwrites it)
+tasks.py init --dir infra     # first init with infra/ as <ops-dir> instead of default ops/
+tasks.py status               # status, deadline, checkbox counts
+tasks.py lint                 # structure, links, secrets, helpers, lib/, env files ignored
+tasks.py lint --run-tests     # also run the tests of lib/ and every helper
+tasks.py --test               # the tool's own tests
 ```
 
 `status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.

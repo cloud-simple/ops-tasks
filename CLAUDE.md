@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A Claude Code plugin marketplace with one plugin, `ops-tasks`, which holds one skill, also named
-`ops-tasks`. The skill teaches Claude to keep infrastructure operations tasks as folders
-(`<ops-dir>/tasks/NN-slug/` with `TODO.md`, `PLAN.md` and `scripts/`) in the repos of the people
-who install it. This repo contains no tasks itself. Everything that ships lives under
-`plugins/ops-tasks/skills/ops-tasks/`:
+A plugin marketplace for Claude Code and Codex with one plugin, `ops-tasks`, which holds one shared
+skill, also named `ops-tasks`. The skill teaches both agents to keep infrastructure operations tasks
+as folders (`<ops-dir>/tasks/NN-slug/` with `TODO.md`, `PLAN.md` and `scripts/`) in the repos of the people
+who install it. This repo contains no tasks itself. The plugin lives under `plugins/ops-tasks/`.
+Its `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` must have the same version.
+The marketplaces are `.claude-plugin/marketplace.json` and `.agents/plugins/marketplace.json`.
+Both point to that plugin. Its shared skill lives under `plugins/ops-tasks/skills/ops-tasks/`:
 
-- `SKILL.md`: the rules Claude follows in a user's repo. It is the specification; `tasks.py` enforces
+- `SKILL.md`: the rules both agents follow in a user's repo. It is the specification; `tasks.py` enforces
   the mechanical parts of it.
 - `scripts/tasks.py`: one Python file, standard library only, Python 3.9 or later. Subcommands
   `init`, `new`, `status`, `lint [--run-tests]`, plus `--test` for its own self-tests.
 - `assets/TODO.md`, `assets/PLAN.md`, `assets/script.sh`: templates that `tasks.py new` copies.
+- `agents/openai.yaml`: Codex display metadata and a starter prompt.
 - `assets/lib/stubtest.py` and `assets/lib/with_timeout.sh`: the shared library that `tasks.py init`
   copies into each user repo as `<ops-dir>/tasks/lib/`. `lint` fails in a user repo when that copy
   differs from the plugin's copy, so a change here forces a re-init in every repo that uses the skill.
@@ -30,6 +33,7 @@ S=plugins/ops-tasks/skills/ops-tasks
 $S/scripts/tasks.py --test                        # 43 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
+python3 scripts/check_package.py                 # manifests, paths and a copied plugin
 claude plugin validate .                          # the marketplace manifest only
 claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
 ```
@@ -76,9 +80,9 @@ group under a time limit and kills the whole group afterwards.
 - Every script and template opens with the same header fields: `Purpose:`, `Usage:`, `Effect:`,
   `Runs on:`, and for helpers `Connection:` and `Exit:`. `lint` checks these fields in helpers.
 - Shell is bash 3.2 or later (macOS `/bin/bash`), never zsh-only syntax. Helpers are bash only.
-- Never write `${CLAUDE_SKILL_DIR}` or the plugin cache path into a user repo; it changes with every
-  plugin version. The skill's `allowed-tools` rule only matches `tasks.py` run directly, not through
-  `python3`.
+- Keep one `SKILL.md` for both agents. Resolve `scripts/tasks.py` from the loaded skill's directory
+  and run it directly by absolute path while keeping the working directory in the user's repo.
+  Never save the installed skill path in repo files; it changes with every plugin version.
 - The two library files carry a two-line header saying they are installed copies; keep it, because
   it is what tells a reader in a user repo where to edit.
 
@@ -86,9 +90,8 @@ group under a time limit and kills the whole group afterwards.
 
 `main` is protected: every change reaches it through a pull request with a squash merge.
 
-1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json` in the pull request. Installs
-   read from `origin/main`, so an unmerged version is not released. Installed copies update only
-   when the version changes.
+1. Raise `version` in both plugin manifests to the same value in the pull request. The documented
+   install commands read from the default branch, so an unmerged version is not released.
 2. On a clean local `main` that matches `origin/main`, run
    `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
    entry agree and pushes only the tag `ops-tasks--v<version>`.
