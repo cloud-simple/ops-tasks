@@ -1,9 +1,29 @@
 # ops-tasks
 
-A Claude Code plugin for infrastructure operations tasks. Each task is a folder with the problem, a
-checked plan and tested helper scripts. The plugin holds one skill, `ops-tasks`.
+A plugin for Claude Code and Codex that keeps infrastructure operations tasks as folders. Each task
+holds the problem, a checked plan and tested helper scripts. Both agents use the same `ops-tasks`
+skill, scripts and templates.
 
 ## Install
+
+### Codex
+
+From the command line:
+
+```bash
+codex plugin marketplace add cloud-simple/ops-tasks
+codex plugin add ops-tasks@ops-tasks
+```
+
+Start a new Codex session after installation. Ask for an operations task, or invoke `$ops-tasks`
+explicitly. To refresh the marketplace and install the current version:
+
+```bash
+codex plugin marketplace upgrade ops-tasks
+codex plugin add ops-tasks@ops-tasks
+```
+
+### Claude Code
 
 From inside Claude Code 2.1.275 or later:
 
@@ -58,8 +78,9 @@ name, that holds `.ops-tasks`. The skill works only inside a git repo.
 
 ## Use
 
-Ask Claude to start an operations task, write a plan or runbook, record a step that was done, add a
-helper, or show the status of the tasks. The skill triggers on these requests without being named.
+Ask Claude Code or Codex to start an operations task, write a plan or runbook, record a step that was
+done, add a helper, or show the status of the tasks. The skill triggers on these requests without
+being named.
 
 In a new repo, the first run is `tasks.py init`. It creates `ops/.ops-tasks` (or `NAME/.ops-tasks` with
 `--dir NAME`), installs `<ops-dir>/tasks/lib/`, and adds `/<ops-dir>/tasks/*/out/` and
@@ -67,7 +88,10 @@ In a new repo, the first run is `tasks.py init`. It creates `ops/.ops-tasks` (or
 folder may belong to the project; create the marker there yourself only if the folder is meant for
 tasks. Commit `<ops-dir>/.ops-tasks` and `<ops-dir>/tasks/lib/` afterwards.
 
-Claude runs `tasks.py` from the installed plugin as `${CLAUDE_SKILL_DIR}/scripts/tasks.py`:
+Both agents resolve `scripts/tasks.py` from the directory containing the loaded `SKILL.md` and run
+it by absolute path. The working directory stays in the user's repo so the tool finds the right
+git root. `tasks.py` below means that resolved path; it is not installed on `PATH`. Commands use
+each agent's normal permissions.
 
 | Command | What it does |
 |---|---|
@@ -83,11 +107,15 @@ authorized, or that a step uses the right target; review does that.
 ## Layout of this repo
 
 ```
-.claude-plugin/marketplace.json            the ops-tasks marketplace
+.agents/plugins/marketplace.json          the Codex marketplace
+.claude-plugin/marketplace.json            the Claude Code marketplace
+scripts/check_package.py                  checks manifests, paths and a copied plugin
 plugins/ops-tasks/
-  .claude-plugin/plugin.json               the plugin manifest and its version
+  .codex-plugin/plugin.json                the Codex manifest and version
+  .claude-plugin/plugin.json               the Claude Code manifest and version
   skills/ops-tasks/
-    SKILL.md                               the rules Claude follows
+    SKILL.md                               the rules both agents follow
+    agents/openai.yaml                     Codex display metadata and starter prompt
     scripts/tasks.py                       init, new, status, lint
     assets/                                TODO.md, PLAN.md and script.sh templates
     assets/lib/                            stubtest.py and with_timeout.sh, copied into each repo by init
@@ -106,18 +134,20 @@ S=plugins/ops-tasks/skills/ops-tasks
 $S/scripts/tasks.py --test
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
+python3 scripts/check_package.py
 claude plugin validate .                          # the marketplace manifest only
 claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
 ```
 
 To release:
 
-1. Raise `version` in `plugins/ops-tasks/.claude-plugin/plugin.json` in the pull request, and
-   squash-merge it. Installs read the plugin from `origin/main`, so a version that is not merged
-   is not released.
+1. Raise `version` in both `plugins/ops-tasks/.claude-plugin/plugin.json` and
+   `plugins/ops-tasks/.codex-plugin/plugin.json` to the same value in the pull request, and
+   squash-merge it. The install commands above read the plugin from the default branch, so a
+   version that is not merged is not released.
 2. Update the local `main` to `origin/main`. On that clean `main`, run
    `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
    entry agree, then creates and pushes only the tag `ops-tasks--v<version>`.
 
-Installed copies update only when the version changes. After a change to `assets/lib/`, run
+Use the update commands for each agent above after a release. After a change to `assets/lib/`, run
 `tasks.py init` in each repo that uses the skill and commit its `<ops-dir>/tasks/lib/`.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ops Tasks"
+  short_description: "Plan, run and record infrastructure operations tasks"
+  default_prompt: "Use $ops-tasks to plan an infrastructure operations task with checks and tested helpers."
