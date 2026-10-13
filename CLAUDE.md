@@ -33,7 +33,8 @@ S=plugins/ops-tasks/skills/ops-tasks
 $S/scripts/tasks.py --test                        # 43 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
-python3 scripts/check_package.py                 # manifests, paths and a copied plugin
+python3 scripts/check_package.py --test           # the package checker's own tests
+python3 scripts/check_package.py                  # manifests, paths and a copied plugin
 claude plugin validate .                          # the marketplace manifest only
 claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
 ```

@@ -134,6 +134,7 @@ S=plugins/ops-tasks/skills/ops-tasks
 $S/scripts/tasks.py --test
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
+python3 scripts/check_package.py --test           # the package checker's own tests
 python3 scripts/check_package.py
 claude plugin validate .                          # the marketplace manifest only
 claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
