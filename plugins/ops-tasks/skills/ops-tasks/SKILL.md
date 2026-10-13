@@ -1,6 +1,6 @@
 ---
 name: ops-tasks
-description: Create, plan, run and record infrastructure operations tasks kept as NN-slug/ folders under an operations directory (ops/ by default) with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script in a task folder, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill.
+description: Create, plan, run and record infrastructure operations tasks kept as NN-slug/ folders under an operations directory (ops/ by default) with TODO.md (problem and ideas), PLAN.md (checked steps with exact commands and before/after checks) and scripts/ (numbered helpers with offline --test). Use it whenever the user starts a new operations task, asks for a plan or runbook, wants to tick or record a step that was done, adds or changes a helper script in a task folder, asks for the status of the tasks, or wants the task folders checked or brought into shape, even when they do not name the skill. Do not use it for a standalone script, playbook or configuration file that is not part of an operations task being created or maintained.
 ---
 
 # Operations tasks
