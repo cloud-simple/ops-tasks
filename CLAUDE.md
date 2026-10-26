@@ -16,7 +16,8 @@ Both point to that plugin. Its shared skill lives under `plugins/ops-tasks/skill
   the mechanical parts of it.
 - `scripts/tasks.py`: one Python file, standard library only, Python 3.9 or later. Subcommands
   `init`, `new`, `status`, `lint [--run-tests]`, plus `--test` for its own self-tests.
-- `assets/TODO.md`, `assets/PLAN.md`, `assets/script.sh`: templates that `tasks.py new` copies.
+- `assets/TODO.md`, `assets/PLAN.md`: templates that `tasks.py new` copies. `assets/script.sh` and
+  `assets/remote-script.sh`: templates for a helper and a remote helper (one that runs on a remote system).
 - `agents/openai.yaml`: Codex display metadata and a starter prompt.
 - `assets/lib/stubtest.py` and `assets/lib/with_timeout.sh`: the shared library that `tasks.py init`
   copies into each user repo as `<ops-dir>/tasks/lib/`. `lint` fails in a user repo when that copy
@@ -30,7 +31,7 @@ Run all tests before each commit. They make no network calls.
 
 ```bash
 S=plugins/ops-tasks/skills/ops-tasks
-$S/scripts/tasks.py --test                        # 43 unittest cases, one PASS/FAIL line each
+$S/scripts/tasks.py --test                        # 45 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
 python3 scripts/check_package.py --test           # the package checker's own tests
