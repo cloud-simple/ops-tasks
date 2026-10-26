@@ -146,9 +146,21 @@ To release:
    `plugins/ops-tasks/.codex-plugin/plugin.json` to the same value in the pull request, and
    squash-merge it. The install commands above read the plugin from the default branch, so a
    version that is not merged is not released.
-2. Update the local `main` to `origin/main`. On that clean `main`, run
-   `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
-   entry agree, then creates and pushes only the tag `ops-tasks--v<version>`.
+2. Update the local `main` to `origin/main`. On that clean `main`, tag the merged commit and
+   publish a GitHub release, where `X.Y.Z` is the new version:
+
+   ```bash
+   git tag -a vX.Y.Z -m "Version X.Y.Z"
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --title "Version X.Y.Z" --notes "<notes>"
+   ```
+
+   The notes list the pull requests merged since the last `v*` tag. In Claude Code, the `new` skill
+   of the release-tools plugin (marketplace `umputun-cc-thingz`) runs these commands and writes the
+   notes.
+
+Releases up to 0.3.0 have `ops-tasks--vX.Y.Z` tags from `claude plugin tag`. `v0.3.0` marks the
+same commit as `ops-tasks--v0.3.0`.
 
 Use the update commands for each agent above after a release. After a change to `assets/lib/`, run
 `tasks.py init` in each repo that uses the skill and commit its `<ops-dir>/tasks/lib/`.

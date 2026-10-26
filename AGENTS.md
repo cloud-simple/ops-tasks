@@ -94,9 +94,26 @@ group under a time limit and kills the whole group afterwards.
 
 1. Raise `version` in both plugin manifests to the same value in the pull request. The documented
    install commands read from the default branch, so an unmerged version is not released.
-2. On a clean local `main` that matches `origin/main`, run
-   `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
-   entry agree and pushes only the tag `ops-tasks--v<version>`.
+2. On a clean local `main` that matches `origin/main`, tag the merged commit and publish a GitHub
+   release. In Claude Code, use the `new` skill of the release-tools plugin (marketplace
+   `umputun-cc-thingz`). Pick the release type that matches the version bump, and cancel when the
+   preview's version differs from `version` in `plugin.json`. The skill runs these commands; without
+   it, run them by hand, where `X.Y.Z` is the new version:
+
+   ```bash
+   git tag -a vX.Y.Z -m "Version X.Y.Z"
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --title "Version X.Y.Z" --notes "<notes>"
+   ```
+
+   The notes list the pull requests merged since the last `v*` tag, grouped by the prefix of their
+   title (`feat:`, `fix:` and so on). Leave out the version bump pull request.
+
+Tags are `vX.Y.Z`, and the skill computes the next version from the last one. Releases up to 0.3.0
+have `ops-tasks--vX.Y.Z` tags from `claude plugin tag`; `v0.3.0` marks the same commit as
+`ops-tasks--v0.3.0`. Plugin dependency version ranges resolve only against `ops-tasks--vX.Y.Z`
+tags. When another plugin declares a version range on `ops-tasks`, also run
+`claude plugin tag --push plugins/ops-tasks` for each release.
 
 After a change to `assets/lib/`, each repo that uses the skill must run `tasks.py init` again and
 commit its `<ops-dir>/tasks/lib/`.
