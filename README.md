@@ -70,7 +70,7 @@ claude plugin update ops-tasks@ops-tasks
     NN-slug/
       TODO.md              problem, ideas, status
       PLAN.md              facts, connections, steps with Before/Do/After checks, results, log
-      scripts/             optional: numbered bash helpers, each with an offline --test
+      scripts/             optional: numbered bash helpers (local or remote), each with an offline --test
 ```
 
 `<ops-dir>` is `ops/` when `ops/.ops-tasks` exists, else the first folder in the repo root, sorted by
@@ -117,7 +117,7 @@ plugins/ops-tasks/
     SKILL.md                               the rules both agents follow
     agents/openai.yaml                     Codex display metadata and starter prompt
     scripts/tasks.py                       init, new, status, lint
-    assets/                                TODO.md, PLAN.md and script.sh templates
+    assets/                                TODO.md, PLAN.md, script.sh and remote-script.sh templates
     assets/lib/                            stubtest.py and with_timeout.sh, copied into each repo by init
 ```
 

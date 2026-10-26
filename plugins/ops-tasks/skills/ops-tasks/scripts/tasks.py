@@ -44,12 +44,20 @@ What lint checks, and what it cannot prove:
 - Helpers: bash only (`NN-verb-object.sh`, first line `#!/usr/bin/env bash`), the executable bit,
   header fields, a `--test` branch, a tests file, and no absolute paths to network tools or /dev/tcp.
   Finding `--test` does not prove the tests are offline or useful; `--run-tests` runs them.
+- Remote helpers (header `Runs on: remote: <ID>`): the IDs also appear in `Connection:`, no `source`
+  or `.` command and no with_timeout (the remote system has neither lib/ nor the env file), and all
+  code sits in one `{ ... }` block. The block check reads the raw lines, and `bash -n` checks that
+  the file parses and that the file cut at any line end inside the block does not, so such a cut
+  runs nothing. The source and with_timeout checks look only at code: a small scanner drops
+  comments, string text and here-document bodies, and keeps command substitutions. It is a
+  heuristic, not a bash parser, and its mistakes cannot change the block check.
 - Code fences are opened by three or more backticks or tildes and closed by the same character
   repeated at least as often.
 """
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -84,6 +92,16 @@ BAD_FENCE_LANGS = ("", "sh", "zsh", "shell")
 CHECKBOX_RE = re.compile(r"^\s*[-*] \[([ xX])\] ")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 HEADER_FIELDS = ("Purpose:", "Usage:", "Effect:", "Runs on:", "Connection:", "Exit:")
+CONNECTION_HEADER_RE = re.compile(r"^#\s*Connection:\s*(.*)$", re.M)
+REMOTE_RE = re.compile(r"^#\s*Runs on:\s*remote:\s*(.*)$", re.M)  # a helper that runs on a remote system
+# Commands a remote helper cannot run there: sourcing a file (lib/ and the env file are not there) and with_timeout.
+# A heuristic, matched on the code of each line (see code_lines); it does not parse shell syntax.
+REMOTE_FORBIDDEN_RE = re.compile(r"(^|[;&|({!]|\b(then|do|else|elif|if|while|until|builtin|command))\s*"
+                                 r"(source|\.)\s+\S|\bwith_timeout\b")
+HEREDOC_RE = re.compile(r"<<(-?)[ \t]*((?:\\.|'[^']*'|\"[^\"]*\"|[^\s;&|<>()'\"\\])+)")  # the whole delimiter word
+COMMAND_START_RE = re.compile(r"(^|[;&|({!]|\b(then|do|else|elif|if|while|until))\s*$")
+BLOCK_OPEN_RE = re.compile(r"^\{\s*(#.*)?$")
+BLOCK_CLOSE_RE = re.compile(r"^\}\s*(#.*)?$")
 TODO_HEADINGS = ("## Problem", "## Ideas")
 CONNECTION_COLUMNS = ("ID", "Kind", "Target", "Settings and credentials from", "Allowed actions")
 CONNECTION_KINDS = ("system", "repo", "pipeline")
@@ -530,8 +548,180 @@ def lint_script(script: Path, rep: Report):
             rep.error(script, f"absolute path to '{tool}' bypasses the test stubs; call it by name")
     if re.search(r"/dev/(tcp|udp)/", text):
         rep.error(script, "/dev/tcp or /dev/udp opens network connections the tests cannot stub")
+    remote = REMOTE_RE.search(head)
+    if remote:
+        lint_remote(script, text, head, remote.group(1), rep)
     lint_secrets(script, text, rep)
     lint_waits(script, text, rep)
+
+
+def code_lines(text: str) -> list:
+    """(line_no, code) for each line of a bash script that holds code, without its literal text.
+
+    A small scanner, not a bash parser. It drops comments, here-document bodies, the content of
+    single-quoted and $'...' strings and the text of double-quoted strings; each string stays as an
+    empty pair of quotes. A command substitution, $(...) or `...`, runs, so its code stays as ( ... ),
+    also inside double quotes and with its own quoted arguments. It knows here-strings (<<<),
+    arithmetic ($(( )) and (( ))) and case patterns. Strings may span lines. Substitutions in the body
+    of an unquoted here-document are not seen."""
+    # stack: the open contexts: ' and $' strings, " string, ")" a $( ... ), ` a `...`, "(" a subshell,
+    # "((" arithmetic, "case" a case statement
+    out, stack, heredocs = [], [], []
+    for no, line in enumerate(text.split("\n"), 1):
+        if heredocs:
+            strip_tabs, tag = heredocs[0]
+            if (line.lstrip("\t") if strip_tabs else line) == tag:
+                heredocs.pop(0)
+            continue
+        code, prev, j = [], " ", 0
+        while j < len(line):
+            c, top = line[j], (stack[-1] if stack else "")
+            if top in ("'", "$'"):
+                if c == "\\" and top == "$'":
+                    j += 2
+                    continue
+                if c == "'":
+                    stack.pop()
+                    code.append("'")
+                j += 1
+                continue
+            if top == '"':
+                if c == "\\":
+                    j += 2
+                elif c == '"':
+                    stack.pop()
+                    code.append('"')
+                    j += 1
+                elif line.startswith("$(", j):
+                    stack.append(")")
+                    code.append("(")
+                    j += 2
+                elif c == "`":
+                    stack.append("`")
+                    code.append("(")
+                    j += 1
+                else:
+                    j += 1
+                continue
+            # code: the top level, or inside $( ... ), ` ... `, ( ... ), (( ... )) or case ... esac
+            if c == "#" and prev.isspace():
+                break
+            command_start = bool(COMMAND_START_RE.search("".join(code)))
+            if line.startswith("<<<", j):  # here-string: its word follows, not a here-document
+                code.append("<<<")
+                j += 3
+            elif line.startswith("<<", j) and "((" not in stack and HEREDOC_RE.match(line, j):
+                heredoc = HEREDOC_RE.match(line, j)
+                heredocs.append((heredoc.group(1) == "-", re.sub(r"['\"\\]", "", heredoc.group(2))))
+                code.append(heredoc.group(0))
+                j = heredoc.end()
+            elif c == "\\":
+                code.append(line[j:j + 2])
+                j += 2
+            elif line.startswith("$'", j):
+                stack.append("$'")
+                code.append("'")
+                j += 2
+            elif c in "'\"":
+                stack.append(c)
+                code.append(c)
+                j += 1
+            elif line.startswith("$((", j) or (line.startswith("((", j) and command_start):
+                stack.append("((")
+                code.append("((")
+                j += 3 if c == "$" else 2
+            elif line.startswith("$(", j):
+                stack.append(")")
+                code.append("(")
+                j += 2
+            elif c == "`":
+                if top == "`":
+                    stack.pop()
+                    code.append(")")
+                else:
+                    stack.append("`")
+                    code.append("(")
+                j += 1
+            elif c == "(":
+                stack.append("(")
+                code.append(c)
+                j += 1
+            elif c == ")":
+                if top == "((" and line.startswith("))", j):
+                    stack.pop()
+                    code.append("))")
+                    j += 2
+                    prev = ")"
+                    continue
+                if top in ("(", ")"):
+                    stack.pop()
+                    code.append(c)
+                else:
+                    code.append(");" if top == "case" else c)  # a case pattern ends; a command follows
+                j += 1
+            elif command_start and re.match(r"case\s", line[j:]):
+                stack.append("case")
+                code.append("case")
+                j += 4
+            elif command_start and top == "case" and re.match(r"esac([\s;&|)`]|$)", line[j:]):
+                stack.pop()
+                code.append("esac")
+                j += 4
+            else:
+                code.append(c)
+                j += 1
+            prev = code[-1][-1]
+        joined = "".join(code).strip()
+        if joined:
+            out.append((no, joined))
+    return out
+
+
+def block_closes_early(text: str, first: int, last: int):
+    """The line where the { ... } block opened on line `first` is already complete, before line `last`.
+
+    bash -n parses the file cut after each line in between. A cut that parses would run the code before
+    it, so it means the block closed there. Returns that line number, or None. Cuts inside a line are
+    not checked."""
+    lines = text.splitlines(keepends=True)
+    for no in range(first, last):
+        proc = subprocess.run(["bash", "-n"], input="".join(lines[:no]), capture_output=True, text=True)
+        if proc.returncode == 0:
+            return no
+    return None
+
+
+def lint_remote(script: Path, text: str, head: str, runs_on: str, rep: Report):
+    """A remote helper runs on a system from Connections, without <ops-dir>/tasks/lib/ and the env file."""
+    if not re.split(r"[(;]", runs_on, maxsplit=1)[0].strip():
+        rep.error(script, "'Runs on: remote:' must name the Connections ID of the system the helper runs on")
+    conn = CONNECTION_HEADER_RE.search(head)
+    listed = split_ids(conn.group(1)) if conn else []
+    for n in split_ids(runs_on):
+        if n not in listed:
+            rep.error(script, f"'Runs on: remote:' names '{n}', which 'Connection:' does not list")
+    for no, line in code_lines(text):
+        if REMOTE_FORBIDDEN_RE.search(line):
+            rep.error(script, "a remote helper runs where <ops-dir>/tasks/lib/ and the env file do not exist: "
+                              "do not source files or call with_timeout; use timeout there", no)
+    # The block check reads the raw lines and asks bash, so a scanner mistake cannot cause it.
+    one_block = ("a remote helper must put everything after its header in one { ... } block, with { and } on lines "
+                 "of their own, so bash reads the whole file before it runs any of it")
+    raw = [(no, line.strip()) for no, line in enumerate(text.splitlines(), 1)
+           if line.strip() and not line.strip().startswith("#")]
+    if not raw or not BLOCK_OPEN_RE.match(raw[0][1]) or not BLOCK_CLOSE_RE.match(raw[-1][1]):
+        rep.error(script, one_block)
+        return
+    try:
+        proc = subprocess.run(["bash", "-n"], input=text, capture_output=True, text=True)
+        early = block_closes_early(text, raw[0][0], raw[-1][0]) if proc.returncode == 0 else None
+    except OSError as exc:
+        rep.error(script, f"cannot run bash -n to check the {{ ... }} block: {exc.strerror or exc}")
+        return
+    if proc.returncode != 0:
+        rep.error(script, "bash -n: " + (proc.stderr.strip().splitlines() or ["syntax error"])[0])
+    elif early:
+        rep.error(script, f"the {{ ... }} block is already complete here, before the last line; {one_block}", early)
 
 
 def lint_task(task: Path, rep: Report):
@@ -580,7 +770,7 @@ def lint_task(task: Path, rep: Report):
         for s in sorted(p for p in scripts.iterdir() if p.is_file() and not p.name.startswith(".")):
             lint_script(s, rep)
             if plan.exists() and s.suffix == ".sh":
-                m = re.search(r"^#\s*Connection:\s*(.*)$", "\n".join(s.read_text().splitlines()[:20]), re.M)
+                m = CONNECTION_HEADER_RE.search("\n".join(s.read_text().splitlines()[:20]))
                 if m:
                     check_ids(s, "Connection:", split_ids(m.group(1)), ids, rep)
 
@@ -1263,6 +1453,82 @@ class SelfTests(unittest.TestCase):
             s.write_text("#!/usr/bin/env bash\n# Purpose: x\n# Usage: x\n# Effect: read-only\n# Runs on: Mac\n# Connection: none\n"
                          "# Exit: 0\n# --test\n" + body + "\n")
             self.assertIn(expected, "\n".join(cmd_lint(self.lay, [], False).errors))
+
+    def test_remote_helper_template_passes_lint_and_its_tests(self):
+        t = self.make_good_task()
+        s = t / "scripts" / "02-restart-demo.sh"
+        text = (ASSETS / "remote-script.sh").read_text().replace('HOSTS="<host name>"', 'HOSTS="web01.test.invalid"')
+        s.write_text(re.sub(r"^# Effect: .*$", "# Effect: changes: restarts demo; dry run unless --apply", text, flags=re.M))
+        s.chmod(0o755)
+        uname = {"uname": [{"args": ["-n"], "stdout": "web01.test.invalid\n"}]}
+        (t / "scripts" / "tests" / "02-restart-demo.json").write_text(json.dumps({"cases": [
+            {"name": "dry run on the right system", "stubs": dict(uname, timeout=[]),
+             "expect": {"stdout_contains": ["Dry run"], "calls": [["uname", "-n"]]}},
+            {"name": "a look-alike system is refused", "args": ["--apply"],
+             "stubs": {"timeout": [], "uname": [{"args": ["-n"], "stdout": "web01.test.invalid.evil\n"}]},
+             "expect": {"exit": 2, "stderr_contains": ["Wrong system"], "stdout_not_contains": ["Action"]}},
+            {"name": "a missing tool stops it before any call", "stubs": uname,
+             "expect": {"exit": 2, "stderr_contains": ["Missing on this system: timeout"], "calls": []}},
+        ]}))
+        self.assertEqual(cmd_lint(self.lay, [], False).errors, [])
+        proc = subprocess.run([str(s), "--test"], capture_output=True, text=True, timeout=60)
+        self.assertEqual((proc.returncode, proc.stdout.count("PASS ")), (0, 3), proc.stdout + proc.stderr)
+        remote = self.root / "remote" / "home" / "ops"  # sent through `bash -s`: $0 is bash, no lib/ nearby
+        remote.mkdir(parents=True)
+        with s.open() as script:
+            proc = subprocess.run(["bash", "-s", "--", "--test"], stdin=script, cwd=remote,
+                                  capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("runs on the operator's machine only", proc.stderr)
+        # A cut-off transfer runs nothing: bash -x would print "+ <command>" for each command it ran.
+        full = s.read_bytes()
+        end = full.rindex(b"}")
+        cuts = {i + 1 for i, b in enumerate(full[:end]) if b == ord("\n")} | set(range(end - 40, end + 1))
+        for cut in sorted(cuts):
+            proc = subprocess.run(["bash", "-x", "-s", "--", "--apply"], input=full[:cut], cwd=remote,
+                                  capture_output=True, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, timeout=10)
+            ran = [line for line in proc.stderr.decode().splitlines() if line.startswith("+")]
+            self.assertEqual((ran, proc.stdout), ([], b""), f"the file cut after byte {cut} ran commands")
+
+    def test_lint_checks_remote_helpers(self):
+        t = self.make_good_task()
+        s = t / "scripts" / "02-check-disk.sh"
+        head = ("#!/usr/bin/env bash\n# Purpose: x\n# Usage: x [--test]\n# Effect: read-only\n"
+                "# Runs on: remote: web01 (Ubuntu 22.04, bash 5, as root)\n# Connection: none\n# Exit: 0 ok\n")
+        bad = ['source "$HERE/../../lib/with_timeout.sh"', "main() { with_timeout df -h; }",
+               "if true; then . ./env; fi", "if source ./env; then :; fi", "! . ./env", "builtin source ./env",
+               'value="$(with_timeout curl https://example.test)"', 'value="$(source ./env; echo ok)"',
+               'value="$(with_timeout curl "$URL")"', 'value="$(source "$ENV_FILE"; echo ok)"',
+               'n="$(wc -l < "$(dirname "$0")/x")"; v=`builtin source "$F"`',
+               'value="$(case "$kind" in a) source "$F"; echo ok ;; *) echo no ;; esac)"']
+        s.write_text(head + "echo before the block\n{\n" + "\n".join(bad) + '\nmain "$@"\n}\n')
+        s.chmod(0o755)
+        (t / "scripts" / "tests" / "02-check-disk.json").write_text('{"cases": []}')
+        joined = "\n".join(e for e in cmd_lint(self.lay, [], False).errors if "02-check-disk" in e)
+        for no in range(10, 10 + len(bad)):
+            self.assertIn(f"02-check-disk.sh:{no}: a remote helper runs where", joined)
+        self.assertIn("in one { ... } block", joined)
+        self.assertIn("'Runs on: remote:' names 'web01', which 'Connection:' does not list", joined)
+        s.write_text(head.replace("web01 (", "(") + '{\nmain() { :; }\nmain "$@"\n}\n')
+        self.assertIn("must name the Connections ID", "\n".join(cmd_lint(self.lay, [], False).errors))
+        s.write_text(head + "{\necho EARLY\n}\n{\necho LATE\n}\n")  # cut after line 10, it runs EARLY
+        self.assertIn("02-check-disk.sh:10: the { ... } block is already complete here",
+                      "\n".join(cmd_lint(self.lay, [], False).errors))
+        s.write_text(head.replace("# Connection: none", "# Connection: web01") +
+                     '# Never source "$LIB/with_timeout.sh" here.\n{   # one block\n'
+                     'main() { echo "data source: disk"; timeout 30 df -h </dev/null; }\n'
+                     'echo "with_timeout is not installed"\nrun systemctl status app # replaces with_timeout\n'
+                     "printf '%s\\n' 'then source file'\nmain \"$@\"\n"
+                     "cat > /etc/profile.d/app.sh <<'EOF'\n. /etc/app/env\nsource /etc/app/more\nEOF\n"
+                     'echo "a string over two lines,\nsource on the second"\n'
+                     'x="${y#*/}"; n=$#; d="$(dirname "$(pwd)")"; echo "it\'s #1"\n'
+                     "read -r state <<< healthy\nbits=2\nn=$((1 << bits))\nif ((n > 2)); then echo big; fi\n"
+                     "cat <<'END-CONFIG'\nsource /etc/example\nEND-CONFIG\ncat <<END-CONFIG\nx\nEND-CONFIG\n"
+                     "printf '%s\\n' $'it\\'s fine'\n"
+                     'v="$(case "$k" in a) echo source closed ;; esac)"\n}  # end\n\n# end\n')
+        errors = [e for e in cmd_lint(self.lay, [], False).errors if "02-check-disk" in e]
+        self.assertEqual(errors, ["ops/tasks/01-demo/scripts/02-check-disk.sh: Connection: names 'web01', "
+                                  "but PLAN.md has no ## Connections table"])
 
 
 def self_test() -> int:

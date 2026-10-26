@@ -16,7 +16,7 @@ Each operations task lives in one folder with the same three parts.
       TODO.md          problem, ideas, status
       PLAN.md          steps with exact commands, checks and results
       scripts/         optional: exists once the task has a helper
-        NN-verb-object.sh          helper, numbered by creation order in this task
+        NN-verb-object.sh          helper, numbered by creation order in this task; a remote helper runs on a remote system
         tests/NN-verb-object.json  offline test cases for the helper
         tests/testdata/            fake fixtures for the tests
       out/             captured state, one folder per run (git-ignored)
@@ -145,6 +145,39 @@ Rules, and why:
 - **Evidence:** write captured state to a new folder per run, `<ops-dir>/tasks/NN-slug/out/$(date +%Y%m%dT%H%M%S)/`. Set it once per session and reuse it for before/after files.
 - **No hidden network paths:** never call a network tool by absolute path (`/usr/bin/curl`) and never use `/dev/tcp`; both bypass the test stubs, and `lint` rejects them.
 
+### Remote helpers
+
+A remote helper runs on a system from `## Connections` (a server, VM or container), not on the operator's machine. Write one when a step needs several commands, parsing or a guard on that system. A single command stays an `ssh` line in PLAN.md or in a local helper.
+
+The helper rules above apply, with these differences. Template: [assets/remote-script.sh](assets/remote-script.sh).
+
+- **Header:** `Runs on: remote: <ID> (<OS, bash version, user>)`, where `<ID>` is the Connections ID of the system it runs on. `Connection:` lists the same ID, and any system the helper calls from there.
+- **Self-contained:** the remote system has no `<ops-dir>/tasks/lib/` and no env file. A remote helper sources nothing, does not call `with_timeout`, and needs only the tools on that system. It uses `$0` only in its `--test` branch: when bash reads the script from standard input, `$0` is `bash`.
+- **One block:** everything after the header sits in one `{ ... }` block, with `{` and `}` on lines of their own. Bash reads the whole block before it runs any of it. A cut-off transfer runs nothing, and no command reads the rest of the script as its input. Inside the block, the template keeps the code in `main` and ends with `main "$@"` and `exit`.
+- **`--test` on the operator's machine only:** the branch finds `stubtest.py` through the helper's own path in the task folder. Anywhere else, it says where to run the tests and exits 2.
+- **Tools:** at the start, check with `command -v` that every tool the helper calls exists, and exit 2 with the name of the missing one.
+- **Target:** before any other command, compare `uname -n` exactly with the host names written in the helper, and exit 2 if none matches. `uname -n` reads the local name; `hostname -f` can hang on a DNS lookup.
+- **Finite:** call each command that can hang (service and package managers, mounts, network calls) through the template's `run`: `timeout` from GNU coreutils, with no stdin. `TIMEOUT` must stay above 0, because `timeout 0` means no limit. Stopping the local `ssh` does not stop the helper on the remote system; only its own limits do.
+- **Settings and secrets:** settings come as arguments. A remote helper gets no secret from the operator's machine, neither as an argument nor as an environment variable. When it needs a credential, it reads it on the remote system, from the source its Connections entry names.
+- **Evidence:** the helper prints what it found and writes no evidence files on the remote system. The plan step or the local helper that runs it saves the output under `out/`.
+- **Portable options:** the tests run the local tools of the operator's machine (BSD versions on macOS), and the remote system usually has the GNU versions. Use options that both accept (not `sed -i`, `date -d` or `grep -P`). When the helper needs a version-specific option, stub that tool in the tests.
+
+Run a remote helper by sending the file to bash on the remote system, which keeps no copy. The command sends the file as it is in the working tree, so commit the helper first. The check sends it only when the file is in `HEAD` and has no changes since:
+
+```bash
+f=<ops-dir>/tasks/NN-slug/scripts/03-restart-app.sh
+if git cat-file -e "HEAD:./$f" && git diff --quiet HEAD -- "$f"; then
+  ssh -o BatchMode=yes -o ConnectTimeout=10 web01.example.test 'bash -s -- --apply' < "$f"
+else
+  echo "STOP: $f is not committed as it is"
+fi
+```
+
+- Write `'sudo bash -s -- --apply'` when the helper needs root.
+- Do not use `ssh -n` here: the script reaches bash on standard input.
+- A local helper that runs a remote helper, for example on several systems, uses `with_timeout ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s -- --apply' < "$HERE/03-restart-app.sh"`. Its tests stub `ssh`; the remote helper's own tests cover what runs on the remote system.
+- Copy the file to the remote system only when it must run without the session, for example from cron or a systemd timer. The plan then records its path there, and Rollback says how to remove it.
+
 ### Testing helpers
 
 Every helper supports `--test`. It runs offline self-tests, prints one `PASS <case>` or `FAIL <case>: <reason>` line per case, and exits non-zero if any case fails.
@@ -157,6 +190,9 @@ Cover these cases, scaled by the kind of helper:
 |---|---|
 | read-only | success with parsed output; each read failure on its own (one case per failing source); malformed or missing data; authentication failure; wrong target, including look-alike hosts; timeout; no changing call in any case (`calls_absent_regex`) |
 | changing | the read-only cases, plus: dry run makes zero changing calls; `--apply` makes exactly the expected calls (`calls`); failed precondition; partial failure |
+| remote | the cases above for a read-only or changing helper, plus: wrong system, including a look-alike name (`web01.test.invalid.evil`); a missing tool |
+
+A remote helper's tests run on the operator's machine, like every helper's. They stub `uname` and each tool the helper calls on the remote system, `timeout` included. A `timeout` stub receives the wrapped command as its arguments, so its rules match that command: `{"args_regex": " systemctl is-active app$", "stdout": "active\n"}`. A rule with `"exit": 124` simulates a command that hit its time limit.
 
 Fixtures must use fake names, addresses and credentials (`*.test.invalid`, `not-a-real-password`).
 
@@ -184,4 +220,4 @@ tasks.py --test               # the tool's own tests
 
 `status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.
 
-`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It checks the Connections table (columns, unique IDs, Kind) and that the IDs in helper `Connection:` headers and `Uses:` lines exist. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
+`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It checks the Connections table (columns, unique IDs, Kind), that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
