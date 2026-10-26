@@ -140,15 +140,11 @@ claude plugin validate .                          # the marketplace manifest onl
 claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
 ```
 
-To release:
-
-1. Raise `version` in both `plugins/ops-tasks/.claude-plugin/plugin.json` and
-   `plugins/ops-tasks/.codex-plugin/plugin.json` to the same value in the pull request, and
-   squash-merge it. The install commands above read the plugin from the default branch, so a
-   version that is not merged is not released.
-2. Update the local `main` to `origin/main`. On that clean `main`, run
-   `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
-   entry agree, then creates and pushes only the tag `ops-tasks--v<version>`.
+To release a new version, raise `version` in both `plugins/ops-tasks/.claude-plugin/plugin.json`
+and `plugins/ops-tasks/.codex-plugin/plugin.json` to the same value in a pull request, and release
+from `main` after it is merged. The release version must be the same as `version` in
+`plugin.json`. The install commands above read the plugin from the default branch, so a version
+that is not merged is not released.
 
 Use the update commands for each agent above after a release. After a change to `assets/lib/`, run
 `tasks.py init` in each repo that uses the skill and commit its `<ops-dir>/tasks/lib/`.

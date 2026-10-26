@@ -92,11 +92,9 @@ group under a time limit and kills the whole group afterwards.
 
 `main` is protected: every change reaches it through a pull request with a squash merge.
 
-1. Raise `version` in both plugin manifests to the same value in the pull request. The documented
-   install commands read from the default branch, so an unmerged version is not released.
-2. On a clean local `main` that matches `origin/main`, run
-   `claude plugin tag --push plugins/ops-tasks`. It checks that `plugin.json` and the marketplace
-   entry agree and pushes only the tag `ops-tasks--v<version>`.
+To release a new version of the plugin, raise `version` in both plugin manifests to the same value
+in a pull request, and release from `main` after it is merged. The release version must be the
+same as `version` in `plugin.json`. Users get a new version only through that field on `main`.
 
 After a change to `assets/lib/`, each repo that uses the skill must run `tasks.py init` again and
 commit its `<ops-dir>/tasks/lib/`.
