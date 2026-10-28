@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Purpose: Check that both agents ship the same working ops-tasks skill.
-Usage: python3 scripts/check_package.py [REPO]    check the package in REPO (default: this repo)
-       python3 scripts/check_package.py --test    run this script's own self-tests
-Effect: Read the package and create temporary test files; no network calls.
+Usage: python3 scripts/check_package.py [REPO]         check the package in REPO (default: this repo)
+       python3 scripts/check_package.py --release TAG  check this repo just before tagging release TAG
+       python3 scripts/check_package.py --test         run this script's own self-tests
+Effect: Read the package and create temporary test files. Only --release makes a network call: one
+        read-only `git ls-remote` to origin. It fetches nothing and changes no git refs.
 Runs on: A machine with Python 3.9 or later, bash and git.
 Exit: 0 all checks passed, 1 a check or a self-test failed, 2 wrong arguments.
 """
@@ -19,6 +21,9 @@ import tempfile
 import unittest
 
 ERRORS = (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired)
+RELEASE_REMOTE = "origin"
+RELEASE_BRANCH = "main"
+REMOTE_TIMEOUT = 30  # seconds for the lookup of main on origin
 
 
 @contextlib.contextmanager
@@ -128,10 +133,52 @@ def check(root):
     print("PASS copied plugin: init, new, status and lint --run-tests", flush=True)
 
 
+def git(root, args, timeout=30):
+    """Run a read-only git command in root. Never prompts: stdin is closed and so is the
+    terminal prompt for credentials."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    return subprocess.run(["git", "-C", str(root)] + args, text=True, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
+
+
+def check_release(root, tag):
+    """Check root just before the release tag is created: the tag matches both manifests, the
+    checkout is clean, and HEAD is the commit of main on origin, read live from the server."""
+    plugin = check_manifests(root)
+    version = read_json(plugin / ".claude-plugin/plugin.json")["version"]
+    require(tag == f"v{version}",
+            f"The release tag must be v{version}, the version in both plugin manifests, not {tag}")
+    status = git(root, ["status", "--porcelain", "--untracked-files=all"])
+    require(status.returncode == 0, f"git status failed: {status.stderr.strip()}")
+    require(status.stdout == "",
+            "The checkout must be clean: no staged, unstaged or untracked files")
+    head = git(root, ["rev-parse", "--verify", "HEAD^{commit}"])
+    require(head.returncode == 0, f"Cannot read HEAD: {head.stderr.strip()}")
+    head = head.stdout.strip()
+    ref = f"refs/heads/{RELEASE_BRANCH}"
+    try:
+        live = git(root, ["ls-remote", "--exit-code", RELEASE_REMOTE, ref], timeout=REMOTE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{RELEASE_REMOTE} did not answer within {REMOTE_TIMEOUT} s")
+    require(live.returncode != 2, f"{RELEASE_REMOTE} has no {RELEASE_BRANCH} branch")
+    require(live.returncode == 0,
+            f"Cannot read {RELEASE_BRANCH} from {RELEASE_REMOTE}: {live.stderr.strip()}")
+    lines = live.stdout.strip().splitlines()
+    require(len(lines) == 1 and lines[0].split("\t")[1:] == [ref],
+            f"Unexpected answer from {RELEASE_REMOTE} for {ref}: {live.stdout.strip()}")
+    remote = lines[0].split("\t")[0]
+    require(head == remote,
+            f"HEAD {head[:12]} is not {RELEASE_BRANCH} on {RELEASE_REMOTE} ({remote[:12]}): tag only the "
+            f"merged commit, after git pull --ff-only")
+    print(f"PASS release {tag}: manifests, clean checkout and {RELEASE_BRANCH} on {RELEASE_REMOTE}",
+          flush=True)
+
+
 # --- self-tests ----------------------------------------------------------------------------------
 # Each case copies this repo's package files to a temp folder, breaks one thing and checks that
 # check_manifests names it. The copied-plugin stage is not self-tested: running this script proves
-# it, and the commands it calls have their own tests in tasks.py.
+# it, and the commands it calls have their own tests in tasks.py. The release cases make the copy a
+# git repo whose origin is a local bare repo, so they need no network.
 
 class SelfTests(unittest.TestCase):
     def setUp(self):
@@ -156,6 +203,87 @@ class SelfTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             check_manifests(self.root)
         self.assertIn(message, str(ctx.exception))
+
+    def git_ok(self, cwd, *args):
+        """Run git in cwd with a fixed identity and without the user's signing or hooks."""
+        return run(["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false",
+                    "-c", "core.hooksPath=/dev/null", *args], cwd)
+
+    def make_release_repo(self):
+        """Make the copied package a git repo whose origin is a local bare repo with its main.
+        Return the release tag for the manifest version."""
+        self.remote = self.root.parent / "remote.git"
+        self.git_ok(self.root.parent, "init", "-q", "--bare", str(self.remote))
+        self.git_ok(self.root, "init", "-q")
+        self.git_ok(self.root, "add", "-A")
+        self.git_ok(self.root, "commit", "-q", "-m", "package")
+        self.git_ok(self.root, "remote", "add", "origin", str(self.remote))
+        self.git_ok(self.root, "push", "-q", "origin", "HEAD:refs/heads/main")
+        self.git_ok(self.root, "fetch", "-q", "origin")
+        return "v" + read_json(self.plugin / ".claude-plugin/plugin.json")["version"]
+
+    def assert_release_rejects(self, tag, message):
+        with self.assertRaises(ValueError) as ctx, contextlib.redirect_stdout(io.StringIO()):
+            check_release(self.root, tag)
+        self.assertIn(message, str(ctx.exception))
+
+    def test_release_passes_for_the_tag_of_the_manifest_version(self):
+        tag = self.make_release_repo()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            check_release(self.root, tag)
+        self.assertIn(f"PASS release {tag}", out.getvalue())
+
+    def test_release_rejects_a_tag_that_differs_from_the_manifests(self):
+        tag = self.make_release_repo()
+        for wrong in ("v9.9.9", tag[1:], f"ops-tasks--{tag}"):
+            self.assert_release_rejects(wrong, f"must be {tag}")
+
+    def test_release_rejects_a_checkout_that_is_not_clean(self):
+        tag = self.make_release_repo()
+        skill_md = self.skill / "SKILL.md"
+        skill_md.write_text(skill_md.read_text() + "changed\n")
+        self.assert_release_rejects(tag, "must be clean")  # unstaged
+        self.git_ok(self.root, "add", "-A")
+        self.assert_release_rejects(tag, "must be clean")  # staged
+        self.git_ok(self.root, "reset", "-q", "--hard")
+        self.git_ok(self.root, "config", "status.showUntrackedFiles", "no")
+        (self.root / "notes.txt").write_text("untracked\n")
+        self.assert_release_rejects(tag, "must be clean")  # untracked, although git status hides it
+
+    def test_release_rejects_head_that_is_not_main_on_origin(self):
+        tag = self.make_release_repo()
+        other = self.root.parent / "other"
+        self.git_ok(self.root.parent, "clone", "-q", "-b", "main", str(self.remote), str(other))
+        (other / "later.txt").write_text("later\n")
+        self.git_ok(other, "add", "-A")
+        self.git_ok(other, "commit", "-q", "-m", "later")
+        self.git_ok(other, "push", "-q", "origin", "HEAD:refs/heads/main")
+        # origin/main in the checkout still equals HEAD; only the live lookup sees the new commit.
+        self.assert_release_rejects(tag, "is not main on origin")
+        self.git_ok(self.root, "pull", "-q", "--ff-only", "origin", "main")
+        with contextlib.redirect_stdout(io.StringIO()):
+            check_release(self.root, tag)
+        (self.root / "CHANGELOG.md").write_text("local commit\n")
+        self.git_ok(self.root, "add", "-A")
+        self.git_ok(self.root, "commit", "-q", "-m", "changelog")
+        self.assert_release_rejects(tag, "is not main on origin")  # a commit that is not merged
+
+    def test_release_rejects_a_missing_main_on_origin(self):
+        tag = self.make_release_repo()
+        self.git_ok(self.remote, "update-ref", "-d", "refs/heads/main")
+        self.assert_release_rejects(tag, "origin has no main branch")
+
+    def test_release_rejects_a_failed_lookup(self):
+        tag = self.make_release_repo()
+        self.git_ok(self.root, "remote", "set-url", "origin", str(self.root.parent / "missing.git"))
+        self.assert_release_rejects(tag, "Cannot read main from origin")
+
+    def test_main_parses_the_release_option(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(["--release"]), 2)
+            self.assertEqual(main(["--release", "v1.0.0", "extra"]), 2)
+            self.assertEqual(main(["--release", "--test"]), 2)
+        self.assertIn("--release TAG", err.getvalue())
 
     def test_the_repo_package_passes(self):
         self.assertEqual(check_manifests(self.root), self.plugin.resolve())
@@ -256,14 +384,18 @@ def self_test():
 def main(argv):
     if argv == ["--test"]:
         return self_test()
-    if len(argv) > 1 or (argv and argv[0].startswith("--")):
+    release = len(argv) == 2 and argv[0] == "--release" and not argv[1].startswith("-")
+    if not release and (len(argv) > 1 or (argv and argv[0].startswith("--"))):
         # A mistyped option like --tset must not be resolved as a folder. A repo whose name
         # starts with one dash still works; one that starts with two is passed as ./--name.
-        print("Usage: python3 scripts/check_package.py [REPO | --test]", file=sys.stderr)
+        print("Usage: python3 scripts/check_package.py [REPO | --release TAG | --test]", file=sys.stderr)
         return 2
-    root = Path(argv[0]).resolve() if argv else Path(__file__).resolve().parent.parent
+    this_repo = Path(__file__).resolve().parent.parent
     try:
-        check(root)
+        if release:
+            check_release(this_repo, argv[1])
+            return 0
+        check(Path(argv[0]).resolve() if argv else this_repo)
     except ERRORS as exc:
         print(f"FAIL {exc}", file=sys.stderr)
         return 1

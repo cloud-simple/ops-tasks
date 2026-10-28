@@ -95,6 +95,9 @@ group under a time limit and kills the whole group afterwards.
 To release a new version of the plugin, raise `version` in both plugin manifests to the same value
 in a pull request, and release from `main` after it is merged. The release version must be the
 same as `version` in `plugin.json`. Users get a new version only through that field on `main`.
+Immediately before creating the release tag, run `python3 scripts/check_package.py --release <tag>`
+with the selected tag, and stop if it fails. It checks that the tag is `v` plus that version, that
+the checkout is clean, and that `HEAD` is the commit of `main` on `origin`.
 
 After a change to `assets/lib/`, each repo that uses the skill must run `tasks.py init` again and
 commit its `<ops-dir>/tasks/lib/`.
