@@ -15,10 +15,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 ERRORS = (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired)
 RELEASE_REMOTE = "origin"
@@ -134,20 +137,43 @@ def check(root):
 
 
 def git(root, args, timeout=30):
-    """Run a read-only git command in root. Never prompts: stdin is closed and so is the
-    terminal prompt for credentials."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    return subprocess.run(["git", "-C", str(root)] + args, text=True, stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
+    """Run a read-only git command in root and return the CompletedProcess.
+
+    It never prompts: stdin is closed and so is the terminal prompt for credentials. It takes no
+    optional locks, so git status does not rewrite the index. It runs in its own process group: on
+    timeout the whole group is killed, transport and credential helpers included, then
+    TimeoutExpired is raised."""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    proc = subprocess.Popen(["git", "-C", str(root)] + args, text=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.communicate(timeout=5)  # reap git; a process outside the group may hold the pipes
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
 
 def check_release(root, tag):
-    """Check root just before the release tag is created: the tag matches both manifests, the
-    checkout is clean, and HEAD is the commit of main on origin, read live from the server."""
+    """Check root just before the release tag is created: the tag matches both manifests in HEAD,
+    the checkout is clean, and HEAD is the commit of main on origin, read live from the server."""
     plugin = check_manifests(root)
-    version = read_json(plugin / ".claude-plugin/plugin.json")["version"]
+    # The version comes from the commit being tagged. Files on disk can differ from HEAD even
+    # when git status is empty, for example under git update-index --assume-unchanged.
+    rel = plugin.relative_to(Path(root).resolve()).as_posix()
+    versions = set()
+    for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+        blob = git(root, ["show", f"HEAD:{rel}/{manifest}"])
+        require(blob.returncode == 0, f"Cannot read {rel}/{manifest} from HEAD: {blob.stderr.strip()}")
+        versions.add(json.loads(blob.stdout)["version"])
+    require(len(versions) == 1, "Both plugin manifests in HEAD must have the same version")
+    version = versions.pop()
     require(tag == f"v{version}",
-            f"The release tag must be v{version}, the version in both plugin manifests, not {tag}")
+            f"The release tag must be v{version}, the version of both plugin manifests in HEAD, not {tag}")
     status = git(root, ["status", "--porcelain", "--untracked-files=all"])
     require(status.returncode == 0, f"git status failed: {status.stderr.strip()}")
     require(status.stdout == "",
@@ -192,6 +218,19 @@ class SelfTests(unittest.TestCase):
                             ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
         self.plugin = self.root / "plugins/ops-tasks"
         self.skill = self.plugin / "skills/ops-tasks"
+        environ = mock.patch.dict(os.environ)  # restores the environment after each case
+        environ.start()
+        self.addCleanup(environ.stop)
+        self.isolate_git()
+
+    def isolate_git(self):
+        """Keep the user's git settings out of the fixtures: drop every GIT_* variable, give git an
+        empty global config and no system config. The real --release run keeps the user's config."""
+        for key in [k for k in os.environ if k.startswith("GIT_")]:
+            del os.environ[key]
+        empty = Path(self.temp.name) / "empty-gitconfig"
+        empty.write_text("")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(empty), GIT_CONFIG_NOSYSTEM="1")
 
     def edit_json(self, rel, change):
         path = self.root / rel
@@ -205,9 +244,8 @@ class SelfTests(unittest.TestCase):
         self.assertIn(message, str(ctx.exception))
 
     def git_ok(self, cwd, *args):
-        """Run git in cwd with a fixed identity and without the user's signing or hooks."""
-        return run(["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false",
-                    "-c", "core.hooksPath=/dev/null", *args], cwd)
+        """Run git in cwd with a fixed identity. isolate_git keeps the user's config out."""
+        return run(["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", *args], cwd)
 
     def make_release_repo(self):
         """Make the copied package a git repo whose origin is a local bare repo with its main.
@@ -277,6 +315,61 @@ class SelfTests(unittest.TestCase):
         tag = self.make_release_repo()
         self.git_ok(self.root, "remote", "set-url", "origin", str(self.root.parent / "missing.git"))
         self.assert_release_rejects(tag, "Cannot read main from origin")
+
+    def test_release_reads_the_version_from_head(self):
+        tag = self.make_release_repo()
+        for rel in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+            self.git_ok(self.root, "update-index", "--assume-unchanged", f"plugins/ops-tasks/{rel}")
+            self.edit_json(f"plugins/ops-tasks/{rel}", lambda d: d.update(version="9.9.9"))
+        # git status now shows nothing, but HEAD still has the old version.
+        self.assert_release_rejects("v9.9.9", f"must be {tag}")
+
+    def test_release_leaves_the_index_untouched(self):
+        tag = self.make_release_repo()
+        index = self.root / ".git/index"
+        before = index.read_bytes()
+        later = (self.skill / "SKILL.md").stat().st_mtime + 10
+        os.utime(self.skill / "SKILL.md", (later, later))  # same content, new time: status would refresh
+        with contextlib.redirect_stdout(io.StringIO()):
+            check_release(self.root, tag)
+        self.assertEqual(index.read_bytes(), before)
+
+    def test_release_lookup_timeout_stops_the_transport(self):
+        tag = self.make_release_repo()
+        pidfile = Path(self.temp.name) / "ssh.pid"
+        fake_ssh = Path(self.temp.name) / "fake-ssh"
+        # A shell helper starts in milliseconds, well inside the limit even on a slow machine. It
+        # must start: a missing PID file fails the case, because the cleanup was not exercised.
+        fake_ssh.write_text(f"#!/bin/sh\necho $$ > '{pidfile}'\nexec sleep 30\n")
+        fake_ssh.chmod(0o755)
+        os.environ.update(GIT_SSH_COMMAND=str(fake_ssh), GIT_SSH_VARIANT="ssh")
+        self.git_ok(self.root, "remote", "set-url", "origin", "ssh://offline.invalid/repo")
+        with mock.patch.dict(globals(), REMOTE_TIMEOUT=3):
+            self.assert_release_rejects(tag, "did not answer within 3 s")
+        self.assertTrue(pidfile.exists(), "the fake ssh helper did not start within the time limit")
+        pid = int(pidfile.read_text())
+        for _ in range(40):  # the killed helper is reaped shortly after
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            self.fail(f"the ssh helper {pid} still runs after the time limit")
+
+    def test_release_fixtures_ignore_the_users_git_config(self):
+        # A user's global config file and config passed through the environment, both of which
+        # break the fixture: signed pushes, no file transport, signed commits.
+        home = Path(self.temp.name) / "home"
+        home.mkdir()
+        (home / ".gitconfig").write_text('[push]\n\tgpgSign = true\n[protocol "file"]\n\tallow = never\n')
+        os.environ.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"), GIT_CONFIG_COUNT="1",
+                          GIT_CONFIG_KEY_0="commit.gpgSign", GIT_CONFIG_VALUE_0="true")
+        self.isolate_git()
+        tag = self.make_release_repo()
+        with contextlib.redirect_stdout(io.StringIO()):
+            check_release(self.root, tag)
 
     def test_main_parses_the_release_option(self):
         with contextlib.redirect_stderr(io.StringIO()) as err:
