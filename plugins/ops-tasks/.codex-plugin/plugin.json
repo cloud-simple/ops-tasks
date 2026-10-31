@@ -1,7 +1,7 @@
 {
   "name": "ops-tasks",
   "description": "Operations tasks as folders with a problem, a checked plan and tested helper scripts.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "cloud-simple"
   },
