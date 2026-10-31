@@ -1,7 +1,7 @@
 {
   "name": "ops-tasks",
   "description": "Operations tasks as <ops-dir>/tasks/NN-slug/ folders: TODO.md (problem and ideas), PLAN.md (steps with exact commands, before and after checks, recorded results) and scripts/ (numbered bash helpers with offline tests)",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "cloud-simple"
   },
