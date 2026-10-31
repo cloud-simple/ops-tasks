@@ -31,7 +31,7 @@ Run all tests before each commit. They make no network calls.
 
 ```bash
 S=plugins/ops-tasks/skills/ops-tasks
-$S/scripts/tasks.py --test                        # 45 unittest cases, one PASS/FAIL line each
+$S/scripts/tasks.py --test                        # 52 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
 python3 scripts/check_package.py --test           # the package checker's own tests
