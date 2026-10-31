@@ -16,7 +16,7 @@ Task: [TODO.md](TODO.md). Facts checked on {{DATE}}.
 |---|---|---|---|---|
 | <id> | <system, repo or pipeline> | <exact identity: host, API URL or cluster context; hosting project; pipeline project, job and environment> | <env file and variable names, "hidden prompt, from the password manager", or "typed in step N.M"> | <what the user authorized, with scope: read; push branch ops/NN-slug; open MR; run job deploy for revision X> |
 
-Managed systems: <for each system whose state a repo declares: which repo declares which part, and which pipeline applies it; or "unknown">.
+Managed systems: <for each system whose state a repo declares: which repo declares which part, and which pipeline applies it; "none" when you established that no such system is involved; "unknown" when that is not established yet>.
 
 ## Stop conditions
 

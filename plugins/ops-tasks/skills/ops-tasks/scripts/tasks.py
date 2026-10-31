@@ -37,9 +37,13 @@ What lint checks, and what it cannot prove:
 - PLAN.md: unique step IDs `N.M` matching their `## Phase N`, an "After check passed" box in every
   step with a `**Do:**` part, and code blocks fenced as `bash` (or another named language).
 - <ops-dir>/tasks/lib/ matches the skill's assets/lib/.
-- PLAN.md "## Connections": the table columns, unique IDs and Kind (system, repo, pipeline); the IDs
-  in `Uses:` lines and in helper `Connection:` headers exist in that table. Placeholder rows and IDs
-  that start with '<' are skipped. It cannot check authorization or that a step uses the right target.
+- PLAN.md "## Connections": one such section, the table columns, an ID in every row, unique IDs and
+  Kind (system, repo, pipeline); the IDs in `Uses:` lines and in helper `Connection:` headers exist in
+  that table. Placeholder rows and IDs that start with '<' are skipped. A table with a real row needs
+  exactly one `Managed systems:` line after it, at the start of a line in that section, with an
+  answer that does not start with '<' (a mapping, none or unknown). lint checks that someone answered, not that
+  the answer is true. Lines inside HTML comments count like any other line. It cannot check
+  authorization or that a step uses the right target.
 - The env files are ignored by git, or /<ops-dir>/.env* is in .gitignore when none exists yet.
 - Helpers: bash only (`NN-verb-object.sh`, first line `#!/usr/bin/env bash`), the executable bit,
   header fields, a `--test` branch, a tests file, and no absolute paths to network tools or /dev/tcp.
@@ -107,6 +111,8 @@ CONNECTION_COLUMNS = ("ID", "Kind", "Target", "Settings and credentials from", "
 CONNECTION_KINDS = ("system", "repo", "pipeline")
 USES_RE = re.compile(r"^Uses:\s*(.*)$")
 TABLE_BROKEN = object()  # the Connections table has an error of its own: skip the ID checks
+MANAGED_NOTE = "Managed systems:"  # the note under the Connections table, at the start of a line
+SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")  # a cell of a Markdown table's separator row: ---, :--, --:
 PLAN_HEADINGS = ("## Goal", "## Stop conditions", "## Rollback", "## Log")
 PLAN_NEEDED = {"planned", "in progress", "done"}
 NETWORK_TOOLS = ("curl", "wget", "openssl", "govc", "ssh", "scp", "nc", "dig", "ovftool")
@@ -409,39 +415,77 @@ def split_ids(value: str) -> list:
 
 
 def lint_connections(plan: Path, text: str, rep: Report):
-    """Check the '## Connections' table. Returns its IDs, None when the plan has no such section,
-    or TABLE_BROKEN when the table is missing or has the wrong columns (already reported)."""
-    rows, in_section, found = [], False, False
+    """Check the '## Connections' table and its 'Managed systems:' note. Returns the table's IDs,
+    None when the plan has no such section, or TABLE_BROKEN when the table is missing or has the
+    wrong columns (already reported)."""
+    rows, notes, headings, in_section = [], [], [], False
     for no, line in lines_outside_fences(text):
         if line.startswith("## "):
             in_section = line.strip() == "## Connections"
-            found = found or in_section
+            if in_section:
+                headings.append(no)
             continue
-        if in_section and line.lstrip().startswith("|"):
+        if not in_section:
+            continue
+        if line.lstrip().startswith("|"):
             rows.append((no, [c.strip() for c in line.strip().strip("|").split("|")]))
-    if not found:
+        elif line.startswith(MANAGED_NOTE):
+            notes.append((no, line[len(MANAGED_NOTE):].strip()))
+    if not headings:
         return None
+    if len(headings) > 1:
+        for no in headings[1:]:
+            rep.error(plan, f"## Connections appears more than once (first on line {headings[0]}): "
+                            "keep one Connections section", no)
+        return TABLE_BROKEN
     if not rows:
         rep.error(plan, "## Connections has no table")
         return TABLE_BROKEN
-    (head_no, head), body = rows[0], [r for r in rows[1:] if not all(set(c) <= set(":- ") for c in r[1])]
+    (head_no, head), body = rows[0], [r for r in rows[1:] if not all(SEPARATOR_CELL_RE.match(c) for c in r[1])]
     if tuple(head) != CONNECTION_COLUMNS:
         rep.error(plan, "Connections columns must be: " + " | ".join(CONNECTION_COLUMNS), head_no)
         return TABLE_BROKEN
-    ids = {}
+    ids, real = {}, False
     for no, cells in body:
-        if not cells or cells[0].startswith("<"):
+        if cells[0].startswith("<"):
             continue  # placeholder row from the template
         if len(cells) != len(CONNECTION_COLUMNS):
             rep.error(plan, f"Connections row needs {len(CONNECTION_COLUMNS)} cells", no)
             continue
         cid, kind = cells[0], cells[1]
+        if not cid:
+            rep.error(plan, "Connections row needs an ID", no)
+            continue
+        real = True
         if cid in ids:
             rep.error(plan, f"Connections ID '{cid}' is used twice (first on line {ids[cid]})", no)
         ids.setdefault(cid, no)
         if kind not in CONNECTION_KINDS:
             rep.error(plan, f"Connections '{cid}': Kind must be one of {', '.join(CONNECTION_KINDS)}", no)
+    if real:
+        lint_managed_note(plan, head_no, rows[-1][0], notes, rep)
     return set(ids)
+
+
+def lint_managed_note(plan: Path, head_no: int, last_row_no: int, notes: list, rep: Report):
+    """A Connections table with a real row needs one answered 'Managed systems:' line after the
+    table, in the Connections section. lint checks that someone answered, not that the answer is true."""
+    after = [(no, value) for no, value in notes if no > last_row_no]
+    for no, _ in notes:
+        if no < last_row_no:
+            rep.error(plan, f"'{MANAGED_NOTE}' must follow the Connections table", no)
+    if not after:
+        if not notes:
+            rep.error(plan, f"## Connections has rows but no '{MANAGED_NOTE}' line after the table: name the "
+                            "repo and pipeline for each managed system, or write none or unknown", head_no)
+        return
+    (first_no, value), rest = after[0], after[1:]
+    for no, _ in rest:
+        rep.error(plan, f"'{MANAGED_NOTE}' appears more than once (first on line {first_no})", no)
+    if not value:
+        rep.error(plan, f"'{MANAGED_NOTE}' has no answer", first_no)
+    elif value.startswith("<"):
+        rep.error(plan, f"'{MANAGED_NOTE}' still holds the template text; write the answer", first_no)
 
 
 def check_ids(path: Path, where: str, names: list, ids, rep: Report, no=None):
@@ -1248,6 +1292,8 @@ class SelfTests(unittest.TestCase):
             | vc | system | vcenter.test.invalid | <ops-dir>/.env | read |
             | app | repo | gitlab.com/group/app | APP_REPO | read; open MR |
             | deploy | pipeline | gitlab.com/group/app, job deploy-prod, prod | CI | run deploy-prod |
+
+            Managed systems: app declares the vc VMs; deploy applies them.
             """)
         base = plan.read_text().replace("## Stop conditions", table + "## Stop conditions")
         plan.write_text(base.replace("### 1.1 Fix\n", "### 1.1 Fix\n\nUses: vc, app, <placeholder>\n"))
@@ -1283,6 +1329,100 @@ class SelfTests(unittest.TestCase):
         joined = "\n".join(cmd_lint(self.lay, [], False).errors)
         self.assertIn("step 1.1: Uses: names 'prod', which is not an ID", joined)
         self.assertIn("Connection: names 'prod', which is not an ID", joined)
+
+    CONNECTIONS_HEAD = ("## Connections\n| ID | Kind | Target | Settings and credentials from | Allowed actions |\n"
+                        "|---|---|---|---|---|\n")
+    PLACEHOLDER_ROW = "| <id> | <system, repo or pipeline> | <x> | <x> | <x> |\n"
+    REAL_ROWS = {"system": "| vc | system | vcenter.test.invalid | <ops-dir>/.env | read |\n",
+                 "repo": "| app | repo | gitlab.com/group/app | APP_REPO | read |\n",
+                 "pipeline": "| deploy | pipeline | gitlab.com/group/app, job deploy | CI | run deploy |\n"}
+
+    def connection_errors(self, section, status="in progress"):
+        """The lint errors about Connections and its note, for a plan with section before Stop conditions.
+        The first call creates the task with status."""
+        task = self.tasks / "01-demo"
+        if not task.exists():
+            self.make_good_task(status=status)
+            self.base_plan = (task / "PLAN.md").read_text()
+        (task / "PLAN.md").write_text(self.base_plan.replace("## Stop conditions", section + "## Stop conditions"))
+        return [e for e in cmd_lint(self.lay, [], False).errors if "Connections" in e or MANAGED_NOTE in e]
+
+    def test_managed_note_is_required_for_any_real_row(self):
+        for kind, row in self.REAL_ROWS.items():
+            errors = self.connection_errors(self.CONNECTIONS_HEAD + row)
+            self.assertEqual(len(errors), 1, kind)
+            self.assertIn("has rows but no 'Managed systems:' line", errors[0])
+        mixed = self.CONNECTIONS_HEAD + self.PLACEHOLDER_ROW + self.REAL_ROWS["repo"]
+        self.assertIn("has rows but no", "\n".join(self.connection_errors(mixed)))
+
+    def test_managed_note_accepts_an_answer(self):
+        table = self.CONNECTIONS_HEAD + self.REAL_ROWS["system"]
+        for note in ("Managed systems: gitlab.com/group/infra declares vc; job apply-vsphere applies it.",
+                     "Managed systems: none", "Managed systems: unknown",
+                     "Managed systems: see the infra repo <https://gitlab.test.invalid/infra>."):
+            self.assertEqual(self.connection_errors(table + "\nProse between the table and the note.\n\n" + note + "\n"),
+                             [], note)
+        aligned = self.CONNECTIONS_HEAD.replace("|---|---|---|---|---|", "|:---|---:|:---:|---|---|")
+        self.assertEqual(self.connection_errors(aligned + self.REAL_ROWS["system"] + "Managed systems: none\n"), [])
+
+    def test_managed_note_rejects_an_empty_or_template_answer(self):
+        table = self.CONNECTIONS_HEAD + self.REAL_ROWS["system"]
+        template = next(line for line in (ASSETS / "PLAN.md").read_text().splitlines() if line.startswith(MANAGED_NOTE))
+        for note, expected in (("Managed systems:", "has no answer"), ("Managed systems:   ", "has no answer"),
+                               (template, "still holds the template text")):
+            self.assertIn(expected, "\n".join(self.connection_errors(table + note + "\n")), note)
+
+    def test_managed_note_must_be_one_line_after_the_table(self):
+        head, row, note = self.CONNECTIONS_HEAD, self.REAL_ROWS["system"], "Managed systems: none\n"
+        cases = {
+            "## Connections\n" + note + head[len("## Connections\n"):] + row: "must follow the Connections table",
+            head + row + "## Connections\n" + note: "appears more than once (first on line",
+            head + row + "## Connections\n" + self.PLACEHOLDER_ROW + note: "appears more than once (first on line",
+            head + row + "## Connections\n" + self.REAL_ROWS["repo"] + note: "appears more than once (first on line",
+            head + row + "## Facts\n" + note: "has rows but no",
+            head + row + "```text\n" + note + "```\n": "has rows but no",
+            head + row + "~~~\n" + note + "~~~\n": "has rows but no",
+            head + row + "````md\n```\n" + note + "```\n````\n": "has rows but no",
+            head + row + "    " + note: "has rows but no",
+            head + row + "- " + note: "has rows but no",
+            head + row + "managed systems: none\n": "has rows but no",
+            head + row + note + "Managed systems: unknown\n": "appears more than once",
+        }
+        for section, expected in cases.items():
+            self.assertIn(expected, "\n".join(self.connection_errors(section)), section)
+
+    def test_managed_note_is_skipped_without_a_real_row(self):
+        head = self.CONNECTIONS_HEAD
+        self.assertEqual(self.connection_errors(""), [])  # no Connections section
+        self.assertEqual(self.connection_errors(head), [])  # header only
+        self.assertEqual(self.connection_errors(head + self.PLACEHOLDER_ROW), [])  # the scaffold
+        broken = self.connection_errors(head.replace("| Allowed actions |", "| Actions |") + self.REAL_ROWS["system"])
+        self.assertEqual(len(broken), 1)
+        self.assertIn("Connections columns must be", broken[0])  # no follow-on note error
+        short = self.connection_errors(head + "| vc | system | x |\n")
+        self.assertEqual(len(short), 1)
+        self.assertIn("Connections row needs 5 cells", short[0])
+        for blank in ("|  | system | x | y | read |\n", "| | | | | |\n"):
+            no_id = self.connection_errors(head + blank)
+            self.assertEqual(len(no_id), 1, blank)
+            self.assertIn("Connections row needs an ID", no_id[0])
+        mixed = "\n".join(self.connection_errors(head + "| vc | system | x |\n" + self.REAL_ROWS["repo"]))
+        self.assertIn("needs 5 cells", mixed)
+        self.assertIn("has rows but no", mixed)
+
+    def test_managed_note_applies_to_closed_tasks(self):
+        table = self.CONNECTIONS_HEAD + self.REAL_ROWS["system"]
+        self.assertIn("has rows but no", "\n".join(self.connection_errors(table, status="done")))
+        todo = self.tasks / "01-demo" / "TODO.md"
+        todo.write_text(todo.read_text().replace("Status: done", "Status: dropped"))
+        self.assertIn("has rows but no", "\n".join(self.connection_errors(table)))
+        dated = table + "Managed systems: unknown (not recorded; line added 2026-10-28)\n"
+        self.assertEqual(self.connection_errors(dated), [])
+
+    def test_a_new_task_passes_the_connections_checks(self):
+        cmd_new(self.lay, "fresh", today="2026-10-28")
+        errors = [e for e in cmd_lint(self.lay, [], False).errors if "Connections" in e or MANAGED_NOTE in e]
+        self.assertEqual(errors, [])
 
     def test_helpers_must_be_bash_with_the_bash_shebang(self):
         t = self.make_good_task()
