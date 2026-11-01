@@ -207,7 +207,13 @@ To change the shared library: edit `plugins/ops-tasks/skills/ops-tasks/assets/li
 2. **Plan:** collect facts with read-only commands and put them, dated, in PLAN.md, each with its command. A value you could not measure is an open question, not a fact. List the Connections. Write the steps. Set status `planned`.
 3. **Run:** for each step, run Before, then Do, then After. Change infrastructure only within the scope the user authorized, and honor any gate a step names. Tick each action when it ran, and the After box when the After check passed; Results and Log entries record only what the commands showed. Set status `in progress`.
 4. **Close:** `done` with the date when every active checkbox is ticked; optional steps that were not run move to `## Not used`. `dropped` with the date keeps the unticked history: write the reason in the Log, and never tick a check that did not pass.
-5. **Before committing:** run the checks and fix every error.
+5. **Before committing:** run the checks below and fix every error.
+6. **MRs (merge requests):** each MR must hold the changes of one task only. When pending changes cover several tasks, split them: one branch from the default branch and one MR per task. On each branch, run `git add <paths>`, then `git commit -- <paths>`. The `git add` is required, because `git commit -- <paths>` alone skips new files.
+   - A generated or captured file goes with the task whose change produced it.
+   - Shared code goes with the task that owns that code.
+   - A change that belongs to no task gets its own MR.
+
+Commands:
 
 ```bash
 tasks.py init                 # install or update <ops-dir>/tasks/lib/ (overwrites it)
