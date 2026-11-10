@@ -26,7 +26,7 @@ Each operations task lives in one folder with the same three parts.
 ```
 
 - `<ops-dir>` is the folder with the marker, `ops` by default: `ops/` if `ops/.ops-tasks` exists, else the first folder in the repo root, sorted by name, that holds `.ops-tasks`. The repo root is the git top-level folder. The paths in this skill use `<ops-dir>/`. To use another folder: `tasks.py init --dir infra`. `init` never takes over a folder that exists without the marker, because it may belong to the project. When `init` stops for that reason, ask the user: use a new folder (`init --dir <name>`), or mark the existing one. Never create the marker in an existing folder without the user's confirmation.
-- The env files are `<ops-dir>/.env*`, all git-ignored. Each helper's Connections entry names the one it loads.
+- The env files are `<ops-dir>/.env*`, all git-ignored. Each helper's Connections entry names the one it loads. In a worktree they are links to the main checkout's files (see Worktrees).
 
 - `NN` is two digits: one above every number the scan in Task numbers finds. `slug` is lowercase words joined by hyphens.
 - Create each task with `tasks.py new <slug> --title "<Title>"`, not by hand. Commands: see Workflow.
@@ -134,7 +134,7 @@ Rules, and why:
 - **Bash only:** `NN-verb-object.sh`, numbered by creation order within the task, first line `#!/usr/bin/env bash`, run directly so the shebang picks the shell. Use `jq` for JSON and `awk` or `sed` for text. Link the helper from every step that uses it.
 - **Header:** `Purpose:`, `Usage:`, `Effect:` (`read-only` or `changes: ...`), `Runs on:`, `Connection:` (the Connections IDs, comma-separated, or `none`) and `Exit:` codes. Template: [assets/script.sh](assets/script.sh).
 - **Paths:** the template sets `HERE` to the helper's own folder and `LIB` to `<ops-dir>/tasks/lib`, found relative to `HERE`. Use `"$LIB/..."` for the shared files and paths relative to `$HERE` for the rest, never a path from the repo root.
-- **Connection:** a helper reads settings only from the source its Connections entry names. The env file `<ops-dir>/.env`, loaded through `${OPS_ENV_FILE:-$HERE/../../../.env}`, holds the default connection; a helper for another connection must not load it, because it would override that connection's settings.
+- **Connection:** a helper reads settings only from the source its Connections entry names. The env file `<ops-dir>/.env`, loaded through `${OPS_ENV_FILE:-$HERE/../../../.env}`, holds the default connection; a helper for another connection must not load it, because it would override that connection's settings. Every loader keeps the form `${OPS_ENV_FILE:-<path>}`: the tests set `OPS_ENV_FILE` to a fake file, so a hard-coded path would read the real one. A helper whose connection needs an env file must stop when the file is missing or unreadable; the template's unconditional `source` under `set -euo pipefail` does that.
 - **Secrets:** never in `<ops-dir>/tasks/` (plans, helpers, tests, `out/`). They live in the env file or the password manager named in Connections. Read a typed secret with a hidden prompt; never print it, and never pass it as a command-line argument when the tool has another input (environment variable, standard input, file). A tool that only takes it as an argument is a documented exception: say so in the plan; other local processes can see the argument while the command runs. Never print an env file or show its values; to see what it holds, list the variable names only (`sed 's/=.*/=<redacted>/' <ops-dir>/.env`). For CI variables, record names, owning project or group, credential identity, and protection and environment scope, never values. Check that the intended job can use them without dumping variable APIs, env files or job logs; masking is not a guarantee.
 - **Target:** before any call, check that the helper talks to the system named in its Connections entry, and exit 2 if not. Compare the parsed identifier exactly (host, context, account), never as a substring: `api.example.com.evil.net` contains `api.example.com`. Never print the rejected value. The template shows checks for a URL, an SSH host and a Kubernetes context. For a repo: the git root, the hosting project against the allowed remote forms (SSH and HTTPS of the same project; another project, such as a fork, only with its own ID for that action) and the full commit; for a push, also the push URL (`git remote get-url --push --all`) and the branch, compared without printing URLs. For a pipeline: the project, job, source revision or artifact, environment or account, and relevant non-secret inputs.
 - **`--test` first:** handle `--test` before loading credentials or any setup.
@@ -214,7 +214,7 @@ It holds a lock while it scans and creates the folder, so two `new` runs in one 
 - **Locked:** `new` stops, because the disk may only be unmounted. Lock every worktree on a removable or network disk: `git worktree lock --reason "<disk>" <path>`. Unlock it with `git worktree unlock <path>` before you remove it.
 - **Not locked:** `new` warns and scans only the worktree's last commit, so the numbers and slugs of its uncommitted tasks can be reused. Reconnect the disk if the worktree is still needed. Run `git worktree prune` only after confirming that the worktree is gone for good.
 
-In a git repo, `new` needs Git 2.36 or later and stops with an error on an older Git. In a partial clone (a clone with a promisor remote), it needs Git 2.45 or later, because older Git fetches missing objects while it reads them.
+In a git repo, `new`, `link-env` and `lint` need Git 2.36 or later and stop with an error on an older Git. In a partial clone (a clone with a promisor remote), `new` needs Git 2.45 or later, because older Git fetches missing objects while it reads them.
 
 `new` reads only the current `<ops-dir>` name. To move `<ops-dir>`:
 
@@ -222,6 +222,18 @@ In a git repo, `new` needs Git 2.36 or later and stops with an error on an older
 2. Before the next `new`, check that every active task folder is under the new path, in its branch or worktree. Include uncommitted task folders in worktrees, because a rebase does not move them. Move their `out/` evidence with them.
 
 A task branch left in the old layout can lose its number to reuse.
+
+## Worktrees
+
+### Env files
+
+A new worktree has no `<ops-dir>/.env*` files, because git does not copy ignored files. Run `tasks.py link-env` in the worktree. It links each env file of the main checkout (the first entry of `git worktree list`) that the worktree lacks, and writes nothing else.
+
+- Create and change env files in the main checkout only. A file created in a worktree stays there and is deleted with the worktree.
+- After the main checkout gets a new env file, run `tasks.py link-env` again in each worktree that needs it.
+- A link shares one writable file. A write through the link changes the main checkout's file, and a credential rotation there reaches every worktree at once. A worktree is not a credential boundary, so helpers keep their exact target checks.
+- `link-env` never replaces an existing file or link, and never reads an env file. It stops in the main checkout and outside git, when the main checkout is missing or bare, and when git tracks or does not ignore an env file name, or cannot tell. The main checkout's own `<ops-dir>` holds the sources, even when its name differs from the worktree's. For a missing ignore rule, run `tasks.py init` as its own change.
+- In a linked worktree, `lint` warns about each env file name that is not a link to a usable file of the main checkout, and names the fix. A link must point to the main checkout's entry itself: a link straight to the file that entry points to would miss a later change of that entry.
 
 ## Workflow
 
@@ -244,6 +256,7 @@ Commands:
 tasks.py init                 # install or update <ops-dir>/tasks/lib/ (overwrites it)
 tasks.py init --dir infra     # first init with infra/ as <ops-dir> instead of default ops/
 tasks.py status               # status, deadline, checkbox counts
+tasks.py link-env             # in a linked worktree: link the main checkout's env files
 tasks.py lint                 # structure, links, secrets, helpers, lib/, env files ignored
 tasks.py lint --run-tests     # also run the tests of lib/ and every helper
 tasks.py --test               # the tool's own tests
@@ -251,4 +264,4 @@ tasks.py --test               # the tool's own tests
 
 `status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.
 
-`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It warns when two task folders share a number. It checks the Connections table (one section, columns, an ID in every row, unique IDs, Kind), that a table with a real row has one answered `Managed systems:` line after it, that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, that the `Managed systems:` answer is true, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
+`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It warns when two task folders share a number and, in a linked worktree, about env files that are not links to the main checkout's files. It checks the Connections table (one section, columns, an ID in every row, unique IDs, Kind), that a table with a real row has one answered `Managed systems:` line after it, that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, that the `Managed systems:` answer is true, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
