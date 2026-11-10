@@ -28,7 +28,7 @@ Each operations task lives in one folder with the same three parts.
 - `<ops-dir>` is the folder with the marker, `ops` by default: `ops/` if `ops/.ops-tasks` exists, else the first folder in the repo root, sorted by name, that holds `.ops-tasks`. The repo root is the git top-level folder. The paths in this skill use `<ops-dir>/`. To use another folder: `tasks.py init --dir infra`. `init` never takes over a folder that exists without the marker, because it may belong to the project. When `init` stops for that reason, ask the user: use a new folder (`init --dir <name>`), or mark the existing one. Never create the marker in an existing folder without the user's confirmation.
 - The env files are `<ops-dir>/.env*`, all git-ignored. Each helper's Connections entry names the one it loads.
 
-- `NN` is two digits, the next free number. `slug` is lowercase words joined by hyphens.
+- `NN` is two digits: one above every number the scan in Task numbers finds. `slug` is lowercase words joined by hyphens.
 - Create each task with `tasks.py new <slug> --title "<Title>"`, not by hand. Commands: see Workflow.
 - Resolve `scripts/tasks.py` from the directory containing this loaded `SKILL.md`. Run it directly by its absolute path. Quote the path in shell commands. Keep the working directory in the user's repo so it finds the right git root. In command examples, `tasks.py` means that absolute path; it is not a command on `PATH`. Never save the installed skill path in repo files: it changes with every plugin version.
 - Write in plain language: short sentences, active voice, one term per item, `must` for requirements.
@@ -198,6 +198,31 @@ Fixtures must use fake names, addresses and credentials (`*.test.invalid`, `not-
 
 To change the shared library: edit `plugins/ops-tasks/skills/ops-tasks/assets/lib/` in the plugin repo `cloud-simple/ops-tasks`, not the installed copy, run its tests there (`plugins/ops-tasks/skills/ops-tasks/assets/lib/stubtest.py --test`, `plugins/ops-tasks/skills/ops-tasks/assets/lib/with_timeout.sh --test`), release the plugin, then follow Workflow step 0 in each repo.
 
+## Task numbers
+
+`tasks.py new` gives a new task the number one above every number this clone uses:
+
+- the task folders on disk in every worktree of the clone;
+- the committed `<ops-dir>/tasks` of every worktree's current commit, and of every local and remote-tracking branch.
+
+It holds a lock while it scans and creates the folder, so two `new` runs in one clone get different numbers. It never fetches: run `git fetch` first to see the branches that others pushed. It does not see tags, deleted history or unpushed branches of other clones, so a number can still repeat. `lint` warns when two task folders in one tree share a number. Keep both folders: renaming one breaks links into it.
+
+`new` refuses a slug that a task folder on disk uses. A slug that only a branch uses is allowed, and the new task gets its own number. To continue a task that exists on a branch, work on that branch; never create the task again.
+
+`new` stops when a place cannot be read: a repo that git cannot read (for example a broken config), a failing git call, an unreadable tree or folder, a broken symbolic link on the way to a `tasks` folder, or a worktree folder that is not that worktree (for example the empty mount point of a disk that is not mounted). For a worktree whose folder is missing:
+
+- **Locked:** `new` stops, because the disk may only be unmounted. Lock every worktree on a removable or network disk: `git worktree lock --reason "<disk>" <path>`. Unlock it with `git worktree unlock <path>` before you remove it.
+- **Not locked:** `new` warns and scans only the worktree's last commit, so the numbers and slugs of its uncommitted tasks can be reused. Reconnect the disk if the worktree is still needed. Run `git worktree prune` only after confirming that the worktree is gone for good.
+
+In a git repo, `new` needs Git 2.36 or later and stops with an error on an older Git. In a partial clone (a clone with a promisor remote), it needs Git 2.45 or later, because older Git fetches missing objects while it reads them.
+
+`new` reads only the current `<ops-dir>` name. To move `<ops-dir>`:
+
+1. Merge every open task branch first, or rebase it onto the commit that moves `<ops-dir>`.
+2. Before the next `new`, check that every active task folder is under the new path, in its branch or worktree. Include uncommitted task folders in worktrees, because a rebase does not move them. Move their `out/` evidence with them.
+
+A task branch left in the old layout can lose its number to reuse.
+
 ## Workflow
 
 0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `<ops-dir>/tasks/lib/`, lists what changed, adds `/<ops-dir>/tasks/*/out/` and `/<ops-dir>/.env*` to `.gitignore` when missing), `tasks.py lint --run-tests`, then commit `<ops-dir>/.ops-tasks` and `<ops-dir>/tasks/lib/`. Without a marker, `init` creates `ops/.ops-tasks` at the git top level; outside git it stops with an error. The user creates `<ops-dir>/.env` with the default connection's settings and credentials.
@@ -226,4 +251,4 @@ tasks.py --test               # the tool's own tests
 
 `status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.
 
-`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It checks the Connections table (one section, columns, an ID in every row, unique IDs, Kind), that a table with a real row has one answered `Managed systems:` line after it, that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, that the `Managed systems:` answer is true, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
+`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It warns when two task folders share a number. It checks the Connections table (one section, columns, an ID in every row, unique IDs, Kind), that a table with a real row has one answered `Managed systems:` line after it, that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, that the `Managed systems:` answer is true, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.

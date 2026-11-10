@@ -3,7 +3,8 @@
 
 Purpose: keep every task folder in the same shape.
 Usage:   tasks.py [--root DIR] init [--dir NAME]         install or update <ops-dir>/tasks/lib/ from the skill (overwrites it)
-         tasks.py [--root DIR] new SLUG [--title TEXT]   create the next <ops-dir>/tasks/NN-SLUG from templates
+         tasks.py [--root DIR] new SLUG [--title TEXT]   create <ops-dir>/tasks/NN-SLUG from templates, with
+                                                         a number no task of this clone uses
          tasks.py [--root DIR] status                    list tasks with status, deadline and checkbox counts
          tasks.py [--root DIR] lint [TASK ...] [--run-tests]
                                                          check structure; --run-tests also runs every
@@ -11,9 +12,26 @@ Usage:   tasks.py [--root DIR] init [--dir NAME]         install or update <ops-
          tasks.py --test                                 run this tool's own self-tests
 Effect:  `init` creates <ops-dir>/.ops-tasks when no marker exists, overwrites <ops-dir>/tasks/lib/, and adds
          /<ops-dir>/tasks/*/out/ and /<ops-dir>/.env* to .gitignore when missing. `new` writes one new
-         folder (and runs `init` when <ops-dir>/tasks/lib/ is missing). `status` and `lint` only read.
-         `lint --run-tests` runs the offline tests of <ops-dir>/tasks/lib/ and of the helpers.
-Runs on: any machine with Python 3.9 or later. Standard library only.
+         folder (and runs `init` when <ops-dir>/tasks/lib/ is missing) under a lock file: ops-tasks-new.lock
+         in the clone's common git folder, or <ops-dir>/.ops-tasks.lock outside git. `status` and `lint`
+         only read. `lint --run-tests` runs the offline tests of <ops-dir>/tasks/lib/ and of the helpers.
+Runs on: macOS or Linux with Python 3.9 or later. Standard library only. `new` in a git repo needs
+         Git 2.36 or later, and Git 2.45 or later in a partial clone; it stops with an error on an
+         older Git.
+
+Task numbers (`new`):
+- Inside git, the next number is one above every number found in: the task folders on disk in every
+  registered worktree of the clone, and the committed <ops-dir>/tasks of every worktree HEAD (detached
+  and sparse ones included) and of every local and remote-tracking branch. It reads only the current
+  <ops-dir> name and never fetches (git runs with GIT_NO_LAZY_FETCH=1). Tags, unreachable history and
+  unpushed branches of other clones are not scanned. Outside git, it reads the task folders of the
+  --root folder only. A --root folder inside a repo that is not its top level is refused.
+- A slug that a task folder on disk in any worktree uses is refused. Branches only reserve numbers.
+- A place that cannot be read stops `new`: a repo git cannot read, a failing git call, an unreadable
+  tree or folder, a broken symbolic link on the way to a tasks folder, or a registered worktree folder
+  that is not that worktree (an empty mount point). A missing worktree that
+  is locked stops `new` too, because its disk may not be mounted; a missing one that is not locked
+  gives a warning, and only its last commit is scanned.
 
 Where things are:
 - The repo root is the git top-level folder of the working directory, or the folder given with --root.
@@ -30,6 +48,8 @@ Where things are:
 What lint checks, and what it cannot prove:
 - Folder names, required files and headings, the TODO status, deadline and plan lines, and
   checkbox state for done tasks. scripts/ is optional: it exists once a task has a helper.
+- Two task folders with the same number: a warning, because renaming an existing folder breaks links
+  into it. Two tasks created separately with the same full NN-slug name cannot be detected.
 - Inline local Markdown links `[text](path)` outside code. Reference-style links, paths with
   spaces or escapes, anchors and external links are not checked.
 - Explicit secret patterns only (password/secret/token assignments, license keys, private keys).
@@ -60,12 +80,14 @@ What lint checks, and what it cannot prove:
 """
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -126,6 +148,14 @@ SECRET_PATTERNS = [
 ]
 UNBOUNDED_WAIT_RE = re.compile(r"\buntil\b[^\n]*;\s*do\b|\bwhile\s+(true|:)\s*;\s*do\b")
 TEST_TIMEOUT = 300
+GIT_MIN_VERSION = (2, 36)          # `git worktree list --porcelain -z` came in Git 2.36
+GIT_VERSION_RE = re.compile(r"^git version (\d+)\.(\d+)")
+GIT_TIMEOUT = 30                   # seconds for each git call
+LOCK_WAIT = 30                     # seconds `new` waits for another `new` to finish
+LOCK_NAME = "ops-tasks-new.lock"   # in the clone's common git folder, shared by all its worktrees
+LOCAL_LOCK = ".ops-tasks.lock"     # next to the marker, used outside git
+LOCK_BUSY = "waiting for the lock held by another tasks.py new"
+NULL_SHA_RE = re.compile(r"^0+$")  # the HEAD of a worktree without commits
 
 
 # --- helpers ------------------------------------------------------------------------------------
@@ -190,18 +220,327 @@ def init_layout(root: Path, ops_dir: str = None) -> Layout:
 
 
 def git_toplevel(start: Path):
-    """The git top-level folder that holds start, or None outside git."""
+    """The git top-level folder that holds start, or None outside git.
+
+    Stops when git cannot read the repository there (a broken config, unsafe ownership, a bare repo). Git
+    also says "not a git repository" for damaged metadata (a missing HEAD) and for a wrong GIT_DIR, so that
+    answer means "outside git" only when nothing points to a repo (see repo_evidence). The same holds when
+    git is missing."""
     try:
-        proc = subprocess.run(["git", "-C", str(start), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-    except OSError:
+        proc = run_git(["rev-parse", "--show-toplevel"], cwd=start, env={"LC_ALL": "C", "LANGUAGE": ""})
+    except GitMissing:
+        if repo_evidence(start):
+            raise
         return None
-    return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else None
+    out, err = os.fsdecode(proc.stdout).strip(), os.fsdecode(proc.stderr).strip()
+    if proc.returncode == 0 and out:
+        return Path(out)
+    if proc.returncode != 0 and "not a git repository" in err:
+        why = repo_evidence(start)
+        if why is None:
+            return None
+        err = f"{err} ({why})"
+    raise SystemExit(f"git cannot read the repository at {start}: {err or 'no output'}. Nothing was written.")
+
+
+GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+
+
+def repo_evidence(start: Path):
+    """Why start may be in a git repo although git found none, or None: a git location variable is set,
+    or start or a folder above it (by its given and by its physical path) holds a `.git` entry of any
+    type, a broken symbolic link included. A folder that cannot be checked counts as evidence."""
+    for var in GIT_LOCATION_VARS:
+        if os.environ.get(var):
+            return f"{var} is set"
+    folders = []
+    for p in (Path(os.path.abspath(start)), Path(os.path.realpath(start))):
+        folders += [p] + list(p.parents)
+    for d in dict.fromkeys(folders):
+        try:
+            os.lstat(d / ".git")
+            return f"{d / '.git'} exists"
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            return f"cannot check {d / '.git'}: {e.strerror}"
+    return None
 
 
 def task_dirs(lay: Layout):
     if not lay.tasks.is_dir():
         return []
     return sorted(d for d in lay.tasks.iterdir() if d.is_dir() and TASK_DIR_RE.match(d.name))
+
+
+# --- git: worktrees, branches and the task numbers they use ---------------------------------------
+
+class ScanError(Exception):
+    """A place that may hold task numbers could not be read, so the numbers in use are unknown."""
+
+
+class GitMissing(SystemExit):
+    """git is not installed or not on PATH."""
+
+
+# GIT_NO_LAZY_FETCH stops a partial clone from fetching missing objects (Git 2.45 or later); older Git
+# ignores it, so `new` refuses to scan a partial clone there. The other two keep git from prompting
+# and from writing optional locks.
+GIT_RUN_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+GIT_NO_LAZY_FETCH_VERSION = (2, 45)
+
+
+def run_git(args: list, cwd=None, input_bytes: bytes = None, env: dict = None) -> subprocess.CompletedProcess:
+    """Run git with a time limit, no terminal input and no lazy fetch; output stays bytes. Stops when git hangs."""
+    cmd = ["git"] + (["-C", str(cwd)] if cwd is not None else []) + list(args)
+    extra = {"input": input_bytes} if input_bytes is not None else {"stdin": subprocess.DEVNULL}
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=GIT_TIMEOUT,
+                              env=dict(os.environ, **GIT_RUN_ENV, **(env or {})), **extra)
+    except FileNotFoundError:
+        raise GitMissing("git is not installed or not on PATH. Nothing was written.")
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"`git {args[0]}` did not finish within {GIT_TIMEOUT} s. Nothing was written.")
+
+
+def same_path(a, b) -> bool:
+    """True if a and b name the same physical folder (symbolic links and other aliases resolved)."""
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def in_git(root: Path) -> bool:
+    """True if root is the top-level folder of a git worktree; False for a --root folder outside git.
+    Stops for a folder inside a repo that is not its top level, and when git cannot read the repo."""
+    top = git_toplevel(root)
+    if top is None:
+        return False
+    if not same_path(top, root):
+        raise SystemExit(f"{root} is inside the git repo {top} but is not its top level. Pass the top level "
+                         "as --root, or a folder outside git. Nothing was written.")
+    return True
+
+
+def is_partial_clone(root: Path) -> bool:
+    """True if the clone has a promisor remote, so reading a missing object could fetch it."""
+    for args in (["config", "--get", "extensions.partialClone"],
+                 ["config", "--bool", "--get-regexp", r"^remote\..*\.promisor$"]):
+        proc = run_git(args, cwd=root)
+        if proc.returncode not in (0, 1):
+            raise SystemExit(f"`git {' '.join(args)}` failed: {os.fsdecode(proc.stderr).strip()}")
+        out = os.fsdecode(proc.stdout).split()
+        if args[1] == "--get" and out or args[1] == "--bool" and "true" in out:
+            return True
+    return False
+
+
+def task_names_in(root, ops_dir: str) -> list:
+    """The names in root/<ops_dir>/tasks that look like task folders, of any file type; [] when that path
+    does not exist (for example outside a sparse checkout). A broken symbolic link, a part of the path that
+    is not a folder, or a read error raises ScanError: the path may hide tasks."""
+    path = Path(root)
+    for part in (ops_dir, "tasks"):
+        path = path / part
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            raise ScanError(f"cannot read {path}: {e.strerror}")
+        try:
+            mode = os.stat(path).st_mode  # follows a symbolic link; a broken one raises here
+        except OSError as e:
+            raise ScanError(f"cannot read {path}: {e.strerror}")
+        if not stat.S_ISDIR(mode):
+            raise ScanError(f"{path} is not a folder")
+    try:
+        with os.scandir(path) as entries:
+            return sorted(e.name for e in entries if TASK_DIR_RE.match(e.name))
+    except OSError as e:
+        raise ScanError(f"cannot list {path}: {e.strerror}")
+
+
+def parse_git_version(text: str):
+    """(major, minor) from `git --version` output such as 'git version 2.39.5 (Apple Git-154)', else None."""
+    m = GIT_VERSION_RE.match(text.strip())
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def require_git_version(cmd: str):
+    """Stop unless Git is 2.36 or later: the worktree checks of cmd need `git worktree list --porcelain -z`."""
+    need = ".".join(map(str, GIT_MIN_VERSION))
+    proc = run_git(["--version"])
+    text = os.fsdecode(proc.stdout).strip()
+    version = parse_git_version(text) if proc.returncode == 0 else None
+    if version is None:
+        why = "`git --version` failed" if proc.returncode else f"`git --version` printed {text!r}"
+        raise SystemExit(f"tasks.py {cmd} could not read the Git version: {why}. It needs Git {need} or later. "
+                         "Nothing was written.")
+    if version < GIT_MIN_VERSION:
+        raise SystemExit(f"tasks.py {cmd} needs Git {need} or later for its worktree checks; this is "
+                         f"{text}. Update Git. Nothing was written.")
+    return version
+
+
+def git_common_dir(root: Path) -> str:
+    proc = run_git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=root)
+    if proc.returncode != 0:
+        raise SystemExit(f"Could not find the git folder of {root}: {os.fsdecode(proc.stderr).strip()}")
+    return os.fsdecode(proc.stdout).strip()
+
+
+def list_worktrees(root: Path) -> list:
+    """The clone's registered worktrees, the main one first: dicts with path, head, bare, locked, lock_reason."""
+    proc = run_git(["worktree", "list", "--porcelain", "-z"], cwd=root)
+    if proc.returncode != 0:
+        raise ScanError(f"`git worktree list` failed: {os.fsdecode(proc.stderr).strip()}")
+    trees, cur = [], None
+    for field in proc.stdout.split(b"\0"):
+        if not field:  # an empty field ends a record
+            cur = None
+            continue
+        key, _, value = field.partition(b" ")
+        key, value = key.decode("ascii", "replace"), os.fsdecode(value)
+        if key == "worktree":
+            cur = {"path": value, "head": None, "bare": False, "locked": False, "lock_reason": ""}
+            trees.append(cur)
+        elif cur is None:
+            continue
+        elif key == "HEAD":
+            cur["head"] = value
+        elif key == "bare":
+            cur["bare"] = True
+        elif key == "locked":
+            cur["locked"], cur["lock_reason"] = True, value
+    return trees
+
+
+def check_worktree_folder(path: str, common: str):
+    """Raise ScanError unless the folder at path is a worktree of the clone whose common git folder is common."""
+    proc = run_git(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], cwd=path)
+    lines = os.fsdecode(proc.stdout).splitlines()
+    if proc.returncode != 0 or len(lines) != 2 or not same_path(lines[0], path) or not same_path(lines[1], common):
+        raise ScanError(f"{path} is registered as a worktree of this clone, but the folder there is not that "
+                        "worktree (an empty mount point of a disk that is not mounted?)")
+
+
+def committed_task_names(root: Path, ops_dir: str, commits: list) -> set:
+    """The task folder names in <ops_dir>/tasks of each commit. Each distinct tree is listed once."""
+    path = f"{ops_dir}/tasks"
+    if not commits:
+        return set()
+    proc = run_git(["cat-file", "--batch-check"], cwd=root,
+                   input_bytes="".join(f"{c}:{path}\n" for c in commits).encode())
+    lines = os.fsdecode(proc.stdout).splitlines()
+    if proc.returncode != 0 or len(lines) != len(commits):
+        raise ScanError(f"`git cat-file --batch-check` failed: {os.fsdecode(proc.stderr).strip()}")
+    trees = set()
+    for commit, line in zip(commits, lines):
+        parts = line.split()
+        if line == f"{commit}:{path} missing":
+            # Either the commit has no such folder, or one of its objects is missing: ls-tree tells them apart.
+            check = run_git(["ls-tree", "-z", commit, "--", path], cwd=root)
+            if check.returncode != 0 or check.stdout:
+                raise ScanError(f"cannot read {path} in commit {commit[:12]}")
+        elif len(parts) == 3 and parts[1] == "tree":
+            trees.add(parts[0])
+        elif len(parts) != 3:  # a blob or another type at that path holds no tasks; anything else is unexpected
+            raise ScanError(f"unexpected answer from `git cat-file` for commit {commit[:12]}: {line}")
+    names = set()
+    for tree in sorted(trees):
+        proc = run_git(["ls-tree", "-z", tree], cwd=root)
+        if proc.returncode != 0:
+            raise ScanError(f"cannot read the tree {tree[:12]} of {path}")
+        for entry in filter(None, proc.stdout.split(b"\0")):
+            meta, _, name = entry.partition(b"\t")
+            if meta.split()[1:2] == [b"tree"]:
+                names.add(os.fsdecode(name))
+    return names
+
+
+def scan_tasks(lay: Layout, notes: list, common: str = None) -> tuple:
+    """The task numbers in use, and the slugs of task folders on disk, in this clone.
+
+    It reads the task folders on disk in this tree. With common (the clone's common git folder) it
+    also reads the task folders on disk in every registered worktree, and the committed <ops-dir>/tasks
+    of every worktree HEAD and of every local and remote-tracking branch. It reads only the current
+    <ops-dir> name, never fetches, and raises ScanError when a place cannot be read."""
+    numbers, slugs = set(), {}
+
+    def add(name: str, where: str = None):
+        m = TASK_DIR_RE.match(name)
+        if m:
+            numbers.add(int(m.group(1)))
+            if where is not None:
+                slugs.setdefault(m.group(2), where)
+
+    for name in task_names_in(lay.root, lay.ops_dir):
+        add(name, f"{lay.ops_dir}/tasks/{name}")
+    if common is None:
+        return numbers, slugs
+    commits = set()
+    for wt in list_worktrees(lay.root):
+        if wt["head"] and not NULL_SHA_RE.match(wt["head"]):
+            commits.add(wt["head"])
+        if wt["bare"] or same_path(wt["path"], lay.root):
+            continue
+        try:
+            os.lstat(wt["path"])
+        except FileNotFoundError:
+            if wt["locked"]:
+                reason = f" ({wt['lock_reason']})" if wt["lock_reason"] else ""
+                raise ScanError(f"the worktree {wt['path']} is missing and locked{reason}: its disk may not be "
+                                "mounted, and its uncommitted tasks may use numbers. Mount the disk, or, once the "
+                                "worktree is gone for good, unlock it and run `git worktree prune`")
+            notes.append(f"the worktree {wt['path']} is missing; only its last commit was scanned, so the numbers "
+                         "and slugs of its uncommitted tasks can be reused. Reconnect its disk if the worktree is "
+                         "still needed; run `git worktree prune` only after confirming that it is gone for good")
+            continue
+        except OSError as e:
+            raise ScanError(f"cannot read the worktree {wt['path']}: {e.strerror}")
+        check_worktree_folder(wt["path"], common)
+        for name in task_names_in(wt["path"], lay.ops_dir):
+            add(name, str(Path(wt["path"]) / lay.ops_dir / "tasks" / name))
+    proc = run_git(["for-each-ref", "--format=%(objecttype) %(objectname)", "refs/heads", "refs/remotes"],
+                   cwd=lay.root)
+    if proc.returncode != 0:
+        raise ScanError(f"`git for-each-ref` failed: {os.fsdecode(proc.stderr).strip()}")
+    for line in os.fsdecode(proc.stdout).splitlines():
+        kind, _, sha = line.partition(" ")
+        if kind == "commit":
+            commits.add(sha)
+    for name in committed_task_names(lay.root, lay.ops_dir, sorted(commits)):
+        add(name)
+    return numbers, slugs
+
+
+@contextlib.contextmanager
+def new_lock(path: Path):
+    """Hold an exclusive lock on path while one `new` scans and creates its folder. Waits up to LOCK_WAIT."""
+    try:
+        import fcntl
+    except ImportError:
+        raise SystemExit("tasks.py new needs a system with fcntl (macOS or Linux) for its lock.")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as e:
+        raise SystemExit(f"Cannot open the lock file {path}: {e.strerror}. Nothing was written.")
+    try:
+        deadline, told = time.monotonic() + LOCK_WAIT, False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not told:
+                    print(LOCK_BUSY, file=sys.stderr, flush=True)
+                    told = True
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"Another tasks.py new held the lock {path} for more than {LOCK_WAIT} s. "
+                                     "Nothing was written. Run new again when it has finished.")
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)  # closing the file releases the lock
 
 
 def lines_outside_fences(text: str):
@@ -326,26 +665,54 @@ def cmd_init(lay: Layout) -> list:
 
 # --- new ----------------------------------------------------------------------------------------
 
-def cmd_new(lay: Layout, slug: str, title: str = None, today: str = None) -> Path:
+def cmd_new(lay: Layout, slug: str, title: str = None, today: str = None, notes: list = None) -> Path:
+    """Create the next task folder. The number is one above every number this clone uses (see scan_tasks);
+    a lock keeps two `new` runs in the clone's worktrees from taking the same one. Warnings go to notes,
+    or to stderr when notes is None."""
     if not SLUG_RE.match(slug):
         raise SystemExit(f"Bad slug '{slug}': use lowercase letters, digits and single hyphens.")
-    existing = task_dirs(lay)
-    for d in existing:
-        if TASK_DIR_RE.match(d.name).group(2) == slug:
-            raise SystemExit(f"A task with the slug '{slug}' exists already: {lay.rel(d)}")
-    number = max((int(TASK_DIR_RE.match(d.name).group(1)) for d in existing), default=0) + 1
-    target = lay.tasks / f"{number:02d}-{slug}"
-    if target.exists():
-        raise SystemExit(f"{target} exists already. Nothing was written.")
-    title = title or slug.replace("-", " ").capitalize()
-    today = today or dt.date.today().isoformat()
-    if not lay.lib.is_dir():
-        print("\n".join(cmd_init(lay)))
-    target.mkdir()
-    for name in ("TODO.md", "PLAN.md"):
-        text = (ASSETS / name).read_text()
-        text = text.replace("{{TITLE}}", title).replace("{{DATE}}", today)
-        (target / name).write_text(text)
+    common = None
+    if in_git(lay.root):  # decided once: the lock and the scan use the same answer
+        version = require_git_version("new")
+        common = git_common_dir(lay.root)
+        if version < GIT_NO_LAZY_FETCH_VERSION and is_partial_clone(lay.root):
+            raise SystemExit("This clone is a partial clone, so reading a missing object could fetch it. In a "
+                             "partial clone, tasks.py new needs Git 2.45 or later, which reads without fetching. "
+                             "Nothing was written.")
+        lock = Path(common) / LOCK_NAME
+    else:
+        lock = lay.ops / LOCAL_LOCK
+    found = []
+    with new_lock(lock):
+        try:
+            numbers, slugs = scan_tasks(lay, found, common)
+        except ScanError as e:
+            raise SystemExit(f"Incomplete scan: {e}. No task folder was created, because the task numbers in "
+                             "use are unknown.")
+        if slug in slugs:
+            raise SystemExit(f"A task with the slug '{slug}' exists already: {slugs[slug]}. To continue that "
+                             "task, work in its folder; do not create it again.")
+        target = lay.tasks / f"{max(numbers, default=0) + 1:02d}-{slug}"
+        if target.exists():
+            raise SystemExit(f"{target} exists already. Nothing was written.")
+        title = title or slug.replace("-", " ").capitalize()
+        today = today or dt.date.today().isoformat()
+        if not lay.lib.is_dir():
+            print("\n".join(cmd_init(lay)))
+        target.mkdir()
+        try:
+            for name in ("TODO.md", "PLAN.md"):
+                text = (ASSETS / name).read_text()
+                text = text.replace("{{TITLE}}", title).replace("{{DATE}}", today)
+                (target / name).write_text(text)
+        except BaseException:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+    for note in found:
+        if notes is None:
+            print(f"WARN  {note}", file=sys.stderr)
+        else:
+            notes.append(note)
     return target
 
 
@@ -907,6 +1274,13 @@ def cmd_lint(lay: Layout, names: list, with_tests: bool) -> Report:
     for d in lay.tasks.iterdir():
         if d.is_dir() and d.name not in ("lib",) and not TASK_DIR_RE.match(d.name):
             rep.error(d, "folder name must be NN-slug (or 'lib' for shared code)")
+    by_number = {}
+    for t in all_tasks:
+        by_number.setdefault(int(TASK_DIR_RE.match(t.name).group(1)), []).append(t.name)
+    for names_with_one_number in by_number.values():
+        if len(names_with_one_number) > 1:
+            rep.warn(lay.tasks, f"{', '.join(names_with_one_number)} share one number. Keep both names: the slug "
+                                "tells the tasks apart, and renaming a folder breaks links into it")
     for t in tasks:
         lint_task(t, rep)
     for name in LIB_FILES:
@@ -935,7 +1309,19 @@ def cmd_lint(lay: Layout, names: list, with_tests: bool) -> Report:
 # --- self-tests ---------------------------------------------------------------------------------
 
 class SelfTests(unittest.TestCase):
+    # Keeps the user's git settings out of every test, including the code under test and the processes it
+    # starts: every GIT_* variable is dropped, and git gets no global or system config. The real command
+    # keeps the user's settings.
+    GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t",
+               "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
     def setUp(self):
+        self.saved_env = dict(os.environ)
+        for key in [k for k in os.environ if k.startswith("GIT_")]:
+            del os.environ[key]
+        os.environ.update(self.GIT_ENV)
+        self.addCleanup(self.restore_env)
         self.tmp = tempfile.TemporaryDirectory(prefix="tasks-py-")
         self.root = Path(self.tmp.name)
         self.lay = Layout(self.root)
@@ -946,6 +1332,10 @@ class SelfTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def restore_env(self):
+        os.environ.clear()
+        os.environ.update(self.saved_env)
 
     def make_good_task(self, name="01-demo", status="in progress"):
         t = self.tasks / name
@@ -1669,6 +2059,275 @@ class SelfTests(unittest.TestCase):
         errors = [e for e in cmd_lint(self.lay, [], False).errors if "02-check-disk" in e]
         self.assertEqual(errors, ["ops/tasks/01-demo/scripts/02-check-disk.sh: Connection: names 'web01', "
                                   "but PLAN.md has no ## Connections table"])
+
+    # --- task numbers across worktrees and branches ----------------------------------------------
+
+    def git(self, cwd, *args) -> str:
+        proc = subprocess.run(["git", "-C", str(cwd)] + list(args), capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            self.fail(f"git {' '.join(args)}: {proc.stderr.strip()}")
+        return proc.stdout.strip()
+
+    def make_clone(self) -> tuple:
+        """A git repo next to self.root's ops/, with ops/ initialized and committed: (top, layout)."""
+        if shutil.which("git") is None:
+            self.skipTest("git not installed")
+        top = (self.root / "clone").resolve()
+        top.mkdir()
+        self.git(top, "init", "-q", "-b", "main")
+        lay = Layout(top)
+        lay.tasks.mkdir(parents=True)
+        cmd_init(lay)
+        self.commit_task(top, "01-base")
+        return top, lay
+
+    def commit_task(self, cwd, name, ops_dir="ops"):
+        d = Path(cwd) / ops_dir / "tasks" / name
+        d.mkdir(parents=True)
+        (d / "TODO.md").write_text(f"# {name}\n")
+        self.git(cwd, "add", "-A")
+        self.git(cwd, "commit", "-qm", name)
+
+    def worktree(self, top, name, *args) -> Path:
+        path = self.root / name
+        self.git(top, "worktree", "add", "-q", *args, str(path))
+        return path.resolve()
+
+    def test_new_numbers_after_tasks_in_worktrees_and_branches(self):
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-a", "-b", "a")
+        (wt / "ops" / "tasks" / "02-wip").mkdir()                     # uncommitted, on disk in another worktree
+        side = self.worktree(top, "wt-side", "-b", "side")
+        self.commit_task(side, "04-side")
+        self.git(top, "worktree", "remove", str(side))                # the task now exists only on branches
+        self.git(top, "branch", "dup", "side")                        # a duplicate branch tip
+        self.git(top, "switch", "-q", "-c", "old")
+        self.commit_task(top, "06-old")
+        self.git(top, "update-ref", "refs/remotes/origin/old", "old")  # a stale remote-tracking branch
+        self.git(top, "switch", "-q", "main")
+        self.git(top, "branch", "-D", "old")
+        self.git(top, "switch", "-q", "-c", "renamed")
+        self.commit_task(top, "09-infra", ops_dir="infra")             # another <ops-dir> name is not scanned
+        self.git(top, "switch", "-q", "main")
+        notes = []
+        self.assertEqual(cmd_new(lay, "side", today="2026-11-09", notes=notes).name, "07-side")  # branch slugs pass
+        self.assertEqual(notes, [])
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "wip")
+        self.assertIn("slug 'wip' exists already", str(ctx.exception))
+        self.assertEqual(cmd_new(Layout(wt), "from-a", today="2026-11-09").name, "08-from-a")
+
+    def test_new_scans_detached_and_sparse_worktree_heads(self):
+        top, lay = self.make_clone()
+        det = self.worktree(top, "wt-det", "--detach")
+        self.commit_task(det, "03-det")                                # on no branch: only its HEAD has it
+        sparse = self.worktree(top, "wt-sparse", "--detach")
+        self.commit_task(sparse, "05-sparse")
+        self.git(sparse, "sparse-checkout", "set", "--no-cone", "/.gitignore")
+        self.assertFalse((sparse / "ops").exists())
+        self.assertEqual(cmd_new(lay, "next", today="2026-11-09").name, "06-next")
+
+    def test_new_and_missing_worktrees(self):
+        top, lay = self.make_clone()
+        gone = self.worktree(top, "wt-gone", "--detach")
+        self.commit_task(gone, "04-gone")
+        (gone / "ops" / "tasks" / "05-unsaved").mkdir()
+        shutil.move(str(gone), str(self.root / "wt-gone.away"))
+        notes = []
+        self.assertEqual(cmd_new(lay, "after-gone", today="2026-11-09", notes=notes).name, "05-after-gone")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("is missing; only its last commit was scanned", notes[0])
+        self.assertIn("run `git worktree prune` only after confirming", notes[0])
+        usb = self.worktree(top, "wt-usb", "-b", "usb")
+        self.git(top, "worktree", "lock", "--reason", "usb disk", str(usb))
+        shutil.move(str(usb), str(self.root / "wt-usb.away"))
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "blocked")
+        self.assertIn("wt-usb is missing and locked (usb disk)", str(ctx.exception))
+        usb.mkdir()                                                    # an empty mount point at the registered path
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "blocked")
+        self.assertIn("the folder there is not that worktree", str(ctx.exception))
+        self.assertFalse(any(p.name.endswith("-blocked") for p in lay.tasks.iterdir()))
+
+    def test_new_accepts_the_main_checkout_and_a_worktree_by_any_path(self):
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-b", "-b", "b")
+        link = self.root / "link-to-wt"
+        link.symlink_to(wt)
+        self.assertEqual(cmd_new(Layout(link), "via-link", today="2026-11-09").name, "02-via-link")
+        self.assertEqual(cmd_new(lay, "in-main", today="2026-11-09").name, "03-in-main")
+
+    def test_new_stops_when_a_committed_tree_cannot_be_read(self):
+        top, lay = self.make_clone()
+        self.git(top, "switch", "-q", "-c", "broken")
+        self.commit_task(top, "02-broken")
+        tree = self.git(top, "rev-parse", "broken:ops/tasks")
+        self.git(top, "switch", "-q", "main")
+        (top / ".git" / "objects" / tree[:2] / tree[2:]).unlink()
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "unsure")
+        self.assertIn("Incomplete scan: cannot read", str(ctx.exception))
+
+    def test_new_waits_for_the_lock_and_scans_after_taking_it(self):
+        import fcntl
+        import select
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-c", "-b", "c")
+        fd = os.open(top / ".git" / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "new", "racer"], cwd=wt,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                    text=True)
+            ready, _, _ = select.select([proc.stderr], [], [], 20)
+            line = proc.stderr.readline() if ready else ""
+            (top / "ops" / "tasks" / "02-competing").mkdir()              # created while new waits
+        finally:
+            os.close(fd)
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(line.strip(), LOCK_BUSY)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertIn("ops/tasks/03-racer", out)
+
+    def test_new_gives_up_after_the_lock_wait(self):
+        import fcntl
+        global LOCK_WAIT
+        old_wait, LOCK_WAIT = LOCK_WAIT, 0.3
+        fd = os.open(self.lay.ops / LOCAL_LOCK, os.O_RDWR | os.O_CREAT, 0o600)   # outside git: the local lock
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        old_err, sys.stderr = sys.stderr, open(os.devnull, "w")
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                cmd_new(self.lay, "late")
+        finally:
+            sys.stderr.close()
+            sys.stderr, LOCK_WAIT = old_err, old_wait
+            os.close(fd)
+        self.assertIn("held the lock", str(ctx.exception))
+        self.assertFalse(any(p.name.endswith("-late") for p in self.tasks.iterdir()))
+        self.assertEqual(cmd_new(self.lay, "late", today="2026-11-09").name, "01-late")
+
+    def test_git_version_check(self):
+        for text, ok in (("git version 2.36.0", True), ("git version 2.35.9", False), ("git version 3.0.1", True),
+                         ("git version 2.39.5 (Apple Git-154)", True), ("git version 10.2", True),
+                         ("version 2.40", False), ("", False)):
+            version = parse_git_version(text)
+            self.assertEqual(version is not None and version >= GIT_MIN_VERSION, ok, text)
+        bin_dir = self.root / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "git"
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+        try:
+            for script, expected in (("echo 'git version 2.35.1'", "needs Git 2.36 or later"),
+                                     ("exit 1", "`git --version` failed"),
+                                     ("echo 'something else'", "printed 'something else'")):
+                fake.write_text(f"#!/bin/sh\n{script}\n")
+                fake.chmod(0o755)
+                with self.assertRaises(SystemExit) as ctx:
+                    require_git_version("new")
+                self.assertIn(expected, str(ctx.exception))
+            fake.write_text("#!/bin/sh\necho 'git version 2.36.0'\n")
+            require_git_version("new")
+        finally:
+            os.environ["PATH"] = old_path
+
+    def test_new_stops_when_git_cannot_read_the_repo(self):
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-p", "-b", "p")
+        (wt / "ops" / "tasks" / "07-pending").mkdir()
+        with (top / ".git" / "config").open("a") as f:
+            f.write("[broken\n")
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "probe")
+        self.assertIn("git cannot read the repository", str(ctx.exception))
+        self.assertEqual(task_names_in(top, "ops"), ["01-base"])
+        sub = self.root / "plain" / "inner"
+        sub.mkdir(parents=True)
+        self.git(self.root / "plain", "init", "-q")
+        (sub / "ops").mkdir()
+        (sub / "ops" / MARKER).touch()
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(Layout(sub), "probe")
+        self.assertIn("is not its top level", str(ctx.exception))
+
+    def test_new_stops_when_git_finds_no_repo_but_one_is_there(self):
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-p", "-b", "p")
+        (wt / "ops" / "tasks" / "07-pending").mkdir()
+        (top / ".git" / "HEAD").rename(top / ".git" / "HEAD.saved")   # damaged metadata
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "probe")
+        self.assertIn("not a git repository", str(ctx.exception))
+        self.assertIn(".git exists", str(ctx.exception))
+        (top / ".git" / "HEAD.saved").rename(top / ".git" / "HEAD")
+        os.environ["GIT_DIR"] = str(self.root / "no-such-git-dir")    # a wrong repository location
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "probe")
+        self.assertIn("GIT_DIR is set", str(ctx.exception))
+        del os.environ["GIT_DIR"]
+        loose = self.root / "loose"
+        (loose / "ops" / "tasks").mkdir(parents=True)
+        (loose / "ops" / MARKER).touch()
+        (loose / ".git").symlink_to(self.root / "unmounted" / "repo.git")  # a broken .git link
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(Layout(loose), "probe")
+        self.assertIn(".git exists", str(ctx.exception))
+        self.assertEqual(task_names_in(top, "ops"), ["01-base"])
+        self.assertEqual(task_names_in(loose, "ops"), [])
+        self.assertEqual(cmd_new(self.lay, "control", today="2026-11-09").name, "01-control")  # outside git
+
+    def test_new_stops_on_a_broken_link_to_task_folders(self):
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-l", "-b", "l")
+        (wt / "ops" / "tasks" / "07-pending").mkdir()
+        shutil.move(str(wt / "ops" / "tasks"), str(self.root / "tasks.away"))
+        (wt / "ops" / "tasks").symlink_to(self.root / "unmounted" / "tasks")
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "probe")
+        self.assertIn("Incomplete scan: cannot read ", str(ctx.exception))
+        self.assertIn("wt-l/ops/tasks", str(ctx.exception))
+        with self.assertRaises(ScanError):
+            task_names_in(wt, "ops")
+        self.assertEqual(task_names_in(wt, "infra"), [])                   # a path that does not exist
+
+    def test_new_never_fetches_in_a_partial_clone(self):
+        top, lay = self.make_clone()
+        remote = self.root / "remote.git"
+        self.git(self.root, "init", "-q", "--bare", str(remote))
+        self.git(top, "remote", "add", "origin", str(remote))
+        self.git(top, "switch", "-q", "-c", "side")
+        self.commit_task(top, "08-side")
+        self.git(top, "push", "-q", "origin", "side")
+        tree = self.git(top, "rev-parse", "side:ops/tasks")
+        self.git(top, "switch", "-q", "main")
+        self.git(top, "config", "remote.origin.promisor", "true")
+        self.git(top, "config", "extensions.partialClone", "origin")
+        (top / ".git" / "objects" / tree[:2] / tree[2:]).unlink()
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_new(lay, "probe")
+        version = parse_git_version(os.fsdecode(run_git(["--version"]).stdout))
+        expected = "Incomplete scan: cannot read" if version >= GIT_NO_LAZY_FETCH_VERSION else "partial clone"
+        self.assertIn(expected, str(ctx.exception))
+        self.assertFalse((top / ".git" / "objects" / tree[:2] / tree[2:]).exists())
+        self.assertEqual(list((top / ".git" / "objects" / "pack").glob("*.pack")), [])   # nothing was fetched
+        self.assertEqual(task_names_in(top, "ops"), ["01-base"])
+
+    def test_new_outside_git_uses_the_local_lock(self):
+        self.make_good_task("03-local")
+        self.assertEqual(cmd_new(self.lay, "next", today="2026-11-09").name, "04-next")
+        self.assertTrue((self.lay.ops / LOCAL_LOCK).is_file())
+        self.assertEqual(cmd_lint(self.lay, [], False).errors, [])
+
+    def test_lint_warns_when_two_task_folders_share_a_number(self):
+        self.make_good_task("05-alpha")
+        self.assertFalse(any("share one number" in w for w in cmd_lint(self.lay, [], False).warnings))
+        self.make_good_task("05-beta")
+        warnings = cmd_lint(self.lay, [], False).warnings
+        self.assertIn("ops/tasks: 05-alpha, 05-beta share one number. Keep both names: the slug tells the tasks "
+                      "apart, and renaming a folder breaks links into it", warnings)
 
 
 def self_test() -> int:

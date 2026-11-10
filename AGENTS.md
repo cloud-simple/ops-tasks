@@ -14,8 +14,9 @@ Both point to that plugin. Its shared skill lives under `plugins/ops-tasks/skill
 
 - `SKILL.md`: the rules both agents follow in a user's repo. It is the specification; `tasks.py` enforces
   the mechanical parts of it.
-- `scripts/tasks.py`: one Python file, standard library only, Python 3.9 or later. Subcommands
-  `init`, `new`, `status`, `lint [--run-tests]`, plus `--test` for its own self-tests.
+- `scripts/tasks.py`: one Python file, standard library only, Python 3.9 or later, macOS or Linux.
+  `new` in a git repo needs Git 2.36 or later, and Git 2.45 or later in a partial clone. Subcommands `init`, `new`, `status`,
+  `lint [--run-tests]`, plus `--test` for its own self-tests.
 - `assets/TODO.md`, `assets/PLAN.md`: templates that `tasks.py new` copies. `assets/script.sh` and
   `assets/remote-script.sh`: templates for a helper and a remote helper (one that runs on a remote system).
 - `agents/openai.yaml`: Codex display metadata and a starter prompt.
@@ -31,7 +32,7 @@ Run all tests before each commit. They make no network calls.
 
 ```bash
 S=plugins/ops-tasks/skills/ops-tasks
-$S/scripts/tasks.py --test                        # 52 unittest cases, one PASS/FAIL line each
+$S/scripts/tasks.py --test                        # 66 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
 python3 scripts/check_package.py --test           # the package checker's own tests
@@ -61,6 +62,13 @@ Outside git every subcommand stops unless `--root` is given.
   folder in the repo root, sorted by name, that holds the marker. `init` never takes over a folder
   that exists without the marker.
 - `cmd_init`, `cmd_new`, `cmd_status`, `cmd_lint` are the subcommands. `status` and `lint` only read.
+- `cmd_new` takes its number from `scan_tasks` under `new_lock`: the task folders on disk in every
+  worktree of the clone, plus the committed `<ops-dir>/tasks` of every worktree HEAD and every local
+  and remote-tracking branch. Every git call goes through `run_git`, which has a time limit
+  (`GIT_TIMEOUT`) and sets `GIT_NO_LAZY_FETCH=1`. A place that cannot be read raises `ScanError`,
+  and `new` stops instead of guessing a free number. The git tests build throwaway repos with
+  `make_clone` and `worktree`; `setUp` drops every `GIT_*` variable and the user's git config for the
+  whole test, including the code under test.
 - `lint` is a set of `lint_*` functions that append to a `Report` (errors fail, warnings do not).
   The regexes near the top of the file (`STATUS_RE`, `STEP_RE`, `AFTER_BOX_RE`, `SECRET_PATTERNS`,
   `NETWORK_TOOLS`, and so on) define the shape that `lint` accepts; `SKILL.md` and the templates must
