@@ -15,8 +15,9 @@ Both point to that plugin. Its shared skill lives under `plugins/ops-tasks/skill
 - `SKILL.md`: the rules both agents follow in a user's repo. It is the specification; `tasks.py` enforces
   the mechanical parts of it.
 - `scripts/tasks.py`: one Python file, standard library only, Python 3.9 or later, macOS or Linux.
-  `new` in a git repo needs Git 2.36 or later, and Git 2.45 or later in a partial clone. Subcommands `init`, `new`, `status`,
-  `lint [--run-tests]`, plus `--test` for its own self-tests.
+  In a git repo, `new`, `link-env` and `lint` need Git 2.36 or later, and `new` needs Git 2.45 or
+  later in a partial clone. Subcommands `init`, `new`, `status`, `link-env`, `lint [--run-tests]`,
+  plus `--test` for its own self-tests.
 - `assets/TODO.md`, `assets/PLAN.md`: templates that `tasks.py new` copies. `assets/script.sh` and
   `assets/remote-script.sh`: templates for a helper and a remote helper (one that runs on a remote system).
 - `agents/openai.yaml`: Codex display metadata and a starter prompt.
@@ -32,7 +33,7 @@ Run all tests before each commit. They make no network calls.
 
 ```bash
 S=plugins/ops-tasks/skills/ops-tasks
-$S/scripts/tasks.py --test                        # 66 unittest cases, one PASS/FAIL line each
+$S/scripts/tasks.py --test                        # 73 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
 python3 scripts/check_package.py --test           # the package checker's own tests
@@ -61,7 +62,8 @@ Outside git every subcommand stops unless `--root` is given.
   `<ops-dir>`: the folder holding the empty marker `.ops-tasks`, `ops/` by default, else the first
   folder in the repo root, sorted by name, that holds the marker. `init` never takes over a folder
   that exists without the marker.
-- `cmd_init`, `cmd_new`, `cmd_status`, `cmd_lint` are the subcommands. `status` and `lint` only read.
+- `cmd_init`, `cmd_new`, `cmd_status`, `cmd_link_env`, `cmd_lint` are the subcommands. `status` and `lint`
+  only read.
 - `cmd_new` takes its number from `scan_tasks` under `new_lock`: the task folders on disk in every
   worktree of the clone, plus the committed `<ops-dir>/tasks` of every worktree HEAD and every local
   and remote-tracking branch. Every git call goes through `run_git`, which has a time limit
@@ -69,6 +71,10 @@ Outside git every subcommand stops unless `--root` is given.
   and `new` stops instead of guessing a free number. The git tests build throwaway repos with
   `make_clone` and `worktree`; `setUp` drops every `GIT_*` variable and the user's git config for the
   whole test, including the code under test.
+- `cmd_link_env` and the env checks in `cmd_lint` share `env_link_rows`: one row per `.env*` name
+  in the main checkout or the linked worktree, with the source's problem and the destination's
+  state. `env_link_warning` turns a row into the fix. They check file types and access only and
+  never open an env file.
 - `lint` is a set of `lint_*` functions that append to a `Report` (errors fail, warnings do not).
   The regexes near the top of the file (`STATUS_RE`, `STEP_RE`, `AFTER_BOX_RE`, `SECRET_PATTERNS`,
   `NETWORK_TOOLS`, and so on) define the shape that `lint` accepts; `SKILL.md` and the templates must
@@ -97,6 +103,11 @@ group under a time limit and kills the whole group afterwards.
   Never save the installed skill path in repo files; it changes with every plugin version.
 - The two library files carry a two-line header saying they are installed copies; keep it, because
   it is what tells a reader in a user repo where to edit.
+- When `tasks.py` cannot finish a check (an old Git, a repo git cannot read, a place it cannot
+  read), it stops with an error that names the cause. It never falls back to a weaker check,
+  because a silent fallback can reuse a task number or hide a task.
+- A change that needs design work starts as a proposal in `docs/proposals/YYYYMMDD-slug.md`. The
+  proposal ships in the first pull request that implements it.
 
 ## Branches and releases
 

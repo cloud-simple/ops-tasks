@@ -6,6 +6,8 @@ Usage:   tasks.py [--root DIR] init [--dir NAME]         install or update <ops-
          tasks.py [--root DIR] new SLUG [--title TEXT]   create <ops-dir>/tasks/NN-SLUG from templates, with
                                                          a number no task of this clone uses
          tasks.py [--root DIR] status                    list tasks with status, deadline and checkbox counts
+         tasks.py [--root DIR] link-env                  in a linked worktree, link the main checkout's
+                                                         <ops-dir>/.env* files that this worktree lacks
          tasks.py [--root DIR] lint [TASK ...] [--run-tests]
                                                          check structure; --run-tests also runs every
                                                          helper's --test and the shared test runner
@@ -13,11 +15,13 @@ Usage:   tasks.py [--root DIR] init [--dir NAME]         install or update <ops-
 Effect:  `init` creates <ops-dir>/.ops-tasks when no marker exists, overwrites <ops-dir>/tasks/lib/, and adds
          /<ops-dir>/tasks/*/out/ and /<ops-dir>/.env* to .gitignore when missing. `new` writes one new
          folder (and runs `init` when <ops-dir>/tasks/lib/ is missing) under a lock file: ops-tasks-new.lock
-         in the clone's common git folder, or <ops-dir>/.ops-tasks.lock outside git. `status` and `lint`
-         only read. `lint --run-tests` runs the offline tests of <ops-dir>/tasks/lib/ and of the helpers.
-Runs on: macOS or Linux with Python 3.9 or later. Standard library only. `new` in a git repo needs
-         Git 2.36 or later, and Git 2.45 or later in a partial clone; it stops with an error on an
-         older Git.
+         in the clone's common git folder, or <ops-dir>/.ops-tasks.lock outside git. `link-env` creates
+         symbolic links in <ops-dir>/ only: it never replaces an entry and never reads an env file.
+         `status` and `lint` only read. `lint --run-tests` runs the offline tests of <ops-dir>/tasks/lib/
+         and of the helpers.
+Runs on: macOS or Linux with Python 3.9 or later. Standard library only. In a git repo, `new`,
+         `link-env` and `lint` need Git 2.36 or later, and `new` needs Git 2.45 or later in a partial
+         clone; they stop with an error on an older Git.
 
 Task numbers (`new`):
 - Inside git, the next number is one above every number found in: the task folders on disk in every
@@ -43,7 +47,20 @@ Where things are:
 - `init` never takes over a folder that exists without the marker (it may belong to the project), and
   `init --dir NAME` stops when the marker is in another folder: later commands would use that one.
 - The tasks are in <ops-dir>/tasks/. The env files are <ops-dir>/.env*; tasks.py only keeps them ignored
-  by git and never reads them.
+  by git, links them into linked worktrees (`link-env`) and never reads them.
+
+Env files in a linked worktree (`link-env`, and the matching `lint` warnings):
+- A linked worktree is one that `git worktree add` made; the main checkout is the first entry of
+  `git worktree list`. A source (a main checkout entry) is usable when it is a readable regular file,
+  or a symbolic link to one. The link holds the source's absolute path in the main checkout, and only
+  a link to that entry itself counts as correct. The sources are in the main checkout's own <ops-dir>.
+- `link-env` links each usable source that the worktree lacks. It stops outside git, in the main
+  checkout, when the main repo is bare, missing or not that checkout, when the main checkout has no
+  marker, when <ops-dir> is a symbolic link, and when git tracks or does not ignore an env file name
+  or the git check fails.
+- `lint` in a linked worktree warns about every name on either side that is not a link to a usable
+  source: a missing link, a link elsewhere or a broken one, a copy, a folder, a source that is not
+  usable, and an entry whose source is gone or that exists only in the worktree.
 
 What lint checks, and what it cannot prove:
 - Folder names, required files and headings, the TODO status, deadline and plan lines, and
@@ -178,7 +195,8 @@ class Layout:
         return path.relative_to(self.root).as_posix()
 
     def env_files(self) -> list:
-        return sorted(p for p in self.root.glob(self.env) if p.is_file())
+        """The env files, symbolic links included (a broken one too): git ignores or tracks a link by its name."""
+        return sorted(p for p in self.root.glob(self.env) if p.is_file() or p.is_symlink())
 
 
 def find_ops_dir(root: Path):
@@ -606,14 +624,21 @@ def has_out_rule(lay: Layout) -> bool:
 
 def is_ignored(lay: Layout, rel: str, rules_only: bool = False) -> bool:
     """True if git ignores rel, so wider patterns such as .env* count. A tracked file is not ignored,
-    unless rules_only. Outside git: True if .gitignore has a line naming rel itself or the env pattern."""
+    unless rules_only. Outside git: True if .gitignore has a line naming rel itself or the env pattern.
+    Inside a repo, a failing `git check-ignore` stops tasks.py instead of falling back to that text check."""
+    cmd = ["check-ignore", "-q"] + (["--no-index"] if rules_only else []) + [rel]
     try:
-        cmd = ["git", "-C", str(lay.root), "check-ignore", "-q"] + (["--no-index"] if rules_only else []) + [rel]
-        proc = subprocess.run(cmd, capture_output=True)
+        proc = run_git(cmd, cwd=lay.root, env={"LC_ALL": "C", "LANGUAGE": ""})
+    except GitMissing:
+        if repo_evidence(lay.root):
+            raise
+        proc = None
+    if proc is not None:
         if proc.returncode in (0, 1):
             return proc.returncode == 0
-    except OSError:
-        pass
+        err = os.fsdecode(proc.stderr).strip()
+        if "not a git repository" not in err or repo_evidence(lay.root):
+            raise SystemExit(f"`git check-ignore` failed for {rel}: {err or 'no output'}. Nothing was written.")
     return has_rule(lay.root / ".gitignore", (rel, f"/{rel}", lay.env, lay.env_rule))
 
 
@@ -714,6 +739,188 @@ def cmd_new(lay: Layout, slug: str, title: str = None, today: str = None, notes:
         else:
             notes.append(note)
     return target
+
+
+# --- link-env: the main checkout's env files in a linked worktree --------------------------------
+
+class LinkEnvError(Exception):
+    """The main checkout cannot serve as the source of the env files; the message names the cause."""
+
+
+def env_entries(ops: Path) -> dict:
+    """{name: path} of the .env* entries in the folder ops, of any type, broken links included."""
+    try:
+        with os.scandir(ops) as entries:
+            return {e.name: Path(e.path) for e in entries if e.name.startswith(".env")}
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise LinkEnvError(f"cannot list {ops}: {e.strerror}")
+
+
+def env_source_problem(path: Path):
+    """None when path is a regular file with read access, or a symbolic link to one; else why it is not
+    usable. Checks the file type and the read permission only; it never opens the file."""
+    try:
+        mode = os.stat(path).st_mode
+    except FileNotFoundError:
+        return "a broken symbolic link"
+    except OSError as e:
+        return f"not checkable ({e.strerror})"
+    if stat.S_ISDIR(mode):
+        return "a folder"
+    if not stat.S_ISREG(mode):
+        return "not a regular file"
+    return None if os.access(path, os.R_OK) else "not readable"
+
+
+def entry_path(path) -> str:
+    """path with its folders resolved but its last part kept, so a symbolic link names itself, not its target.
+
+    The folders are resolved as the filesystem reads them: each symbolic link first, then any `..` after
+    it. Normalizing `..` away first (as os.path.abspath does) could name a different file."""
+    path = os.fspath(path)
+    if not os.path.isabs(path):
+        path = os.path.join(os.getcwd(), path)
+    head, tail = os.path.split(path)
+    if tail in ("", ".", ".."):
+        return os.path.realpath(path)
+    return os.path.join(os.path.realpath(head), tail)
+
+
+def env_link_state(dest: Path, source) -> str:
+    """missing, linked (a link to the source entry itself), other-link, broken-link, file or other.
+
+    A link counts as linked only when its target is the source entry, compared with the folders resolved
+    but not the source's own last link: a link straight to the file that the source points to would miss
+    a later change of the source link."""
+    try:
+        mode = os.lstat(dest).st_mode
+    except FileNotFoundError:
+        return "missing"
+    if stat.S_ISLNK(mode):
+        target = os.path.join(os.path.dirname(dest), os.readlink(dest))
+        if source is not None and entry_path(target) == entry_path(source):
+            return "linked" if os.path.exists(dest) else "broken-link"
+        return "other-link" if os.path.exists(dest) else "broken-link"
+    return "file" if stat.S_ISREG(mode) else "other"
+
+
+def env_link_rows(lay: Layout):
+    """In a linked worktree: (the main checkout's <ops-dir>, rows), with one row (name, source or None,
+    source problem or None, destination state) per .env* name on either side. None in the main checkout.
+    Raises LinkEnvError when the main checkout cannot serve as the source."""
+    proc = run_git(["rev-parse", "--path-format=absolute", "--git-dir"], cwd=lay.root)
+    if proc.returncode != 0:
+        raise LinkEnvError(f"`git rev-parse --git-dir` failed: {os.fsdecode(proc.stderr).strip()}")
+    common = git_common_dir(lay.root)
+    if same_path(os.fsdecode(proc.stdout).strip(), common):
+        return None
+    try:
+        trees = list_worktrees(lay.root)
+    except ScanError as e:
+        raise LinkEnvError(str(e))
+    if not trees:
+        raise LinkEnvError("`git worktree list` names no main checkout")
+    main = trees[0]
+    if main["bare"]:
+        raise LinkEnvError("the main repo of this clone is bare, so it has no env files")
+    try:
+        os.lstat(main["path"])
+        check_worktree_folder(main["path"], common)
+        main_ops = find_ops_dir(Path(main["path"]))
+    except FileNotFoundError:
+        raise LinkEnvError(f"the main checkout {main['path']} is missing")
+    except OSError as e:
+        raise LinkEnvError(f"cannot read the main checkout {main['path']}: {e.strerror}")
+    except ScanError as e:
+        raise LinkEnvError(str(e))
+    if main_ops is None:
+        raise LinkEnvError(f"the main checkout {main['path']} has no {MARKER} marker")
+    src_dir = Path(main["path"]) / main_ops  # its own <ops-dir>, which may differ from this worktree's
+    sources, dests = env_entries(src_dir), env_entries(lay.ops)
+    rows = []
+    for name in sorted(set(sources) | set(dests)):
+        source = sources.get(name)
+        try:
+            state = env_link_state(lay.ops / name, source)
+        except OSError as e:
+            raise LinkEnvError(f"cannot read {lay.rel(lay.ops / name)}: {e.strerror}")
+        rows.append((name, source, env_source_problem(source) if source else None, state))
+    return src_dir, rows
+
+
+def env_link_warning(name: str, source, problem, state: str):
+    """What is wrong with one row and how to fix it, or None for a link to a usable source."""
+    if source is None:
+        if state in ("other-link", "broken-link"):
+            return "its source is gone from the main checkout; remove the link"
+        return "exists only in this worktree and is deleted with it; create env files in the main checkout"
+    if problem:
+        return f"its source {source} in the main checkout is {problem}; repair or remove the source there"
+    return {
+        "missing": f"missing; run tasks.py link-env to link {source}",
+        "linked": None,
+        "other-link": f"a link that does not point to {source}; remove the link, then run tasks.py link-env",
+        "broken-link": f"a broken link instead of a link to {source}; remove it, then run tasks.py link-env",
+        "file": f"a copy of {source}, which goes stale after a credential change; check that it holds nothing "
+                "you need, remove it, then run tasks.py link-env",
+        "other": f"a folder or another entry where the link to {source} belongs",
+    }[state]
+
+
+def is_tracked(lay: Layout, rel: str) -> bool:
+    """True if git tracks rel. `git ls-files --error-unmatch` exits 1 for an untracked path; any other
+    failure (a corrupt index, for example) stops tasks.py."""
+    proc = run_git(["ls-files", "--error-unmatch", "--", rel], cwd=lay.root, env={"LC_ALL": "C", "LANGUAGE": ""})
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise SystemExit(f"`git ls-files` failed for {rel}: {os.fsdecode(proc.stderr).strip() or 'no output'}. "
+                     "Nothing was written.")
+
+
+def cmd_link_env(lay: Layout) -> tuple:
+    """Link each usable .env* file of the main checkout that this linked worktree lacks. Returns
+    (lines, warnings). It writes symbolic links only, never replaces an entry and never reads an env file."""
+    if not in_git(lay.root):
+        raise SystemExit("tasks.py link-env needs a git repo: it links the main checkout's env files into a "
+                         "linked worktree. Nothing was written.")
+    require_git_version("link-env")
+    try:
+        found = env_link_rows(lay)
+    except LinkEnvError as e:
+        raise SystemExit(f"tasks.py link-env cannot link here: {e}. Nothing was written.")
+    if found is None:
+        raise SystemExit("This is the main checkout, which holds the env files. Run tasks.py link-env in a "
+                         "linked worktree (one made by git worktree add). Nothing was written.")
+    src_dir, rows = found
+    if lay.ops.is_symlink():
+        raise SystemExit(f"Refusing to write: {lay.rel(lay.ops)} is a symbolic link. Nothing was written.")
+    for name, *_ in rows:
+        rel = f"{lay.ops_dir}/{name}"
+        if is_tracked(lay, rel):
+            raise SystemExit(f"git tracks {rel}: an env file must stay out of git. Remove it from git with "
+                             f"`git rm --cached {rel}` as its own change. Nothing was written.")
+        if not is_ignored(lay, rel, rules_only=True):
+            raise SystemExit(f"git does not ignore {rel}. Run tasks.py init as its own change to add "
+                             f"'{lay.env_rule}' to .gitignore. Nothing was written.")
+    lines, warnings = [], []
+    for name, source, problem, state in rows:
+        rel = f"{lay.ops_dir}/{name}"
+        if source is not None and problem is None and state == "missing":
+            try:
+                os.symlink(os.path.abspath(source), lay.ops / name)
+            except FileExistsError:
+                warnings.append(f"{rel}: appeared while link-env ran; left as it is")
+                continue
+            lines.append(f"  linked: {rel} -> {source}")
+        elif source is not None and problem is None and state == "linked":
+            lines.append(f"  ok:     {rel}")
+        else:
+            warnings.append(f"{rel}: {env_link_warning(name, source, problem, state)}")
+    if not rows:
+        lines.append(f"The main checkout has no {src_dir.name}/.env* files.")
+    return lines, warnings
 
 
 # --- status -------------------------------------------------------------------------------------
@@ -1301,6 +1508,17 @@ def cmd_lint(lay: Layout, names: list, with_tests: bool) -> Report:
                      "and `git rm --cached` the file if git tracks it")
     if env_rule_needed(lay):
         rep.warn(gi, f"add '{lay.env_rule}' so the connection settings and credentials stay out of git")
+    if in_git(lay.root):
+        require_git_version("lint")
+        try:
+            found = env_link_rows(lay)
+        except LinkEnvError as e:
+            rep.warn(lay.ops, f"env file links not checked: {e}")
+            found = None
+        for name, source, problem, state in (found[1] if found else []):
+            msg = env_link_warning(name, source, problem, state)
+            if msg:
+                rep.warn(lay.ops / name, msg)
     if with_tests:
         run_tests(lay, tasks, rep)
     return rep
@@ -2315,6 +2533,192 @@ class SelfTests(unittest.TestCase):
         self.assertEqual(list((top / ".git" / "objects" / "pack").glob("*.pack")), [])   # nothing was fetched
         self.assertEqual(task_names_in(top, "ops"), ["01-base"])
 
+    # --- link-env ------------------------------------------------------------------------------
+
+    def test_link_env_links_usable_sources_and_reports_every_other_state(self):
+        top, lay = self.make_clone()
+        src = top / "ops"
+        elsewhere = self.root / "elsewhere.env"
+        elsewhere.write_text("OTHER=1\n")
+        vault = self.root / "vault" / "app.env"
+        vault.parent.mkdir()
+        vault.write_text("VAULT=1\n")
+        (src / ".env").write_text("API_TOKEN=REAL_SENTINEL\n")
+        for name in (".env.copy", ".env.other", ".env.broken-dest", ".env.folder-dest"):
+            (src / name).write_text("X=1\n")
+        (src / ".env.dir").mkdir()                                           # a source that is a folder
+        (src / ".env.dangling").symlink_to(self.root / "nowhere.env")         # a broken source link
+        (src / ".env.vault").symlink_to(vault)                               # a source link to a real file
+        (src / ".env.direct").symlink_to(vault)
+        wt = self.worktree(top, "wt-e", "-b", "e")
+        dst = wt / "ops"
+        (dst / ".env.copy").write_text("COPY=1\n")
+        (dst / ".env.other").symlink_to(elsewhere)
+        (dst / ".env.broken-dest").symlink_to(self.root / "nowhere.env")
+        (dst / ".env.folder-dest").mkdir()
+        (dst / ".env.orphan").symlink_to(src / ".env.gone")
+        (dst / ".env.local").write_text("LOCAL=1\n")
+        (dst / ".env.direct").symlink_to(vault)                  # skips the source link: misses a retarget
+        lines, warnings = cmd_link_env(Layout(wt))
+        self.assertEqual(lines, [f"  linked: ops/.env -> {src / '.env'}", f"  linked: ops/.env.vault -> {src / '.env.vault'}"])
+        self.assertEqual(os.readlink(dst / ".env"), str(src / ".env"))
+        self.assertEqual((dst / ".env.copy").read_text(), "COPY=1\n")             # never replaced
+        self.assertEqual(os.readlink(dst / ".env.other"), str(elsewhere))
+        expected = {".env.broken-dest": "a broken link instead of a link to",
+                    ".env.copy": "which goes stale after a credential change",
+                    ".env.dangling": "in the main checkout is a broken symbolic link",
+                    ".env.dir": "in the main checkout is a folder",
+                    ".env.direct": "a link that does not point to",
+                    ".env.folder-dest": "a folder or another entry where the link to",
+                    ".env.local": "exists only in this worktree",
+                    ".env.orphan": "its source is gone from the main checkout",
+                    ".env.other": "a link that does not point to"}
+        self.assertEqual(len(warnings), len(expected), warnings)
+        for (name, text), warning in zip(sorted(expected.items()), warnings):
+            self.assertTrue(warning.startswith(f"ops/{name}: ") and text in warning, warning)
+        self.assertNotIn("REAL_SENTINEL", "\n".join(lines + warnings))           # it never reads an env file
+        again, _ = cmd_link_env(Layout(wt))
+        self.assertEqual(again, ["  ok:     ops/.env", "  ok:     ops/.env.vault"])
+        lint_warnings = [w for w in cmd_lint(Layout(wt), [], False).warnings if w.startswith("ops/.env")]
+        self.assertEqual(sorted(w.split(":")[0] for w in lint_warnings), [f"ops/{n}" for n in sorted(expected)])
+        self.assertFalse(any(w.startswith("ops/.env") for w in cmd_lint(lay, [], False).warnings))  # main checkout
+
+    def test_link_env_compares_the_link_target_as_the_filesystem_reads_it(self):
+        top, lay = self.make_clone()
+        (top / "ops" / ".env").write_text("FAKE=main\n")
+        other = self.root / "other"
+        (other / "ops").mkdir(parents=True)
+        (other / "nested").mkdir()
+        (other / "ops" / ".env").write_text("FAKE=other\n")
+        (top / "alias").symlink_to(other / "nested")
+        wt = self.worktree(top, "wt-a", "-b", "a")
+        dest = wt / "ops" / ".env"
+        for target in (f"{top}/alias/../ops/.env", f"../../{top.name}/alias/../ops/.env"):
+            dest.symlink_to(target)
+            self.assertEqual(dest.read_text(), "FAKE=other\n")              # what the link really reads
+            lines, warnings = cmd_link_env(Layout(wt))
+            self.assertEqual(lines, [], target)
+            self.assertEqual(len(warnings), 1, target)
+            self.assertIn("a link that does not point to", warnings[0])
+            dest.unlink()
+        dest.symlink_to(f"../../{top.name}/ops/.env")                           # a correct relative link
+        self.assertEqual(cmd_link_env(Layout(wt)), (["  ok:     ops/.env"], []))
+
+    def test_link_env_follows_new_and_renamed_sources(self):
+        top, lay = self.make_clone()
+        (top / "ops" / ".env").write_text("A=1\n")
+        wt = self.worktree(top, "wt-n", "-b", "n")
+        gone = self.worktree(top, "wt-gone", "-b", "gone")
+        shutil.move(str(gone), str(self.root / "wt-gone.away"))                 # an unrelated missing worktree
+        self.assertEqual(cmd_link_env(Layout(wt))[0], [f"  linked: ops/.env -> {top / 'ops' / '.env'}"])
+        (top / "ops" / ".env.staging").write_text("B=1\n")
+        (top / "ops" / ".env").rename(top / "ops" / ".env.prod")
+        warnings = [w for w in cmd_lint(Layout(wt), [], False).warnings if w.startswith("ops/.env")]
+        self.assertEqual([w.split(": ", 1)[1].split(";")[0] for w in warnings],
+                         ["its source is gone from the main checkout", "missing", "missing"])
+        lines, warnings = cmd_link_env(Layout(wt))
+        self.assertEqual([line.split(" -> ")[0] for line in lines], ["  linked: ops/.env.prod", "  linked: ops/.env.staging"])
+        self.assertEqual(warnings, ["ops/.env: its source is gone from the main checkout; remove the link"])
+
+    def test_link_env_refuses_to_run_where_it_cannot_link_safely(self):
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(self.lay)
+        self.assertIn("needs a git repo", str(ctx.exception))
+        top, lay = self.make_clone()
+        (top / "ops" / ".env").write_text("A=1\n")
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(lay)
+        self.assertIn("This is the main checkout", str(ctx.exception))
+        wt = self.worktree(top, "wt-r", "-b", "r")
+        gi = wt / ".gitignore"
+        gi.write_text(gi.read_text().replace("/ops/.env*\n", ""))
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(Layout(wt))
+        self.assertIn("git does not ignore ops/.env", str(ctx.exception))
+        self.git(wt, "checkout", "--", ".gitignore")
+        (wt / "ops" / ".env.tracked").write_text("T=1\n")
+        self.git(wt, "add", "-f", "ops/.env.tracked")
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(Layout(wt))
+        self.assertIn("git tracks ops/.env.tracked", str(ctx.exception))
+        self.git(wt, "rm", "-q", "--cached", "ops/.env.tracked")
+        (wt / "ops" / ".env.tracked").unlink()
+        self.assertFalse((wt / "ops" / ".env").is_symlink())
+        (top / "ops" / MARKER).rename(top / "marker.saved")             # the main checkout moved to infra/
+        (top / "infra").mkdir()
+        (top / "infra" / MARKER).touch()
+        (top / "infra" / ".env").write_text("A=2\n")
+        self.assertEqual(cmd_link_env(Layout(wt))[0], [f"  linked: ops/.env -> {top / 'infra' / '.env'}"])
+        bare = self.root / "bare.git"
+        self.git(self.root, "clone", "-q", "--bare", str(top), str(bare))
+        wt_bare = self.root / "wt-bare"
+        self.git(bare, "worktree", "add", "-q", str(wt_bare), "main")
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(Layout(wt_bare))
+        self.assertIn("is bare", str(ctx.exception))
+
+    def test_link_env_stops_when_a_git_check_fails(self):
+        top, lay = self.make_clone()
+        (top / "ops" / ".env").write_text("A=1\n")
+        wt = self.worktree(top, "wt-i", "-b", "i")
+        index = Path(self.git(wt, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+        saved = index.read_bytes()
+        index.write_bytes(b"not an index")
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(Layout(wt))
+        self.assertIn("`git ls-files` failed for ops/.env", str(ctx.exception))
+        index.write_bytes(saved)
+        real_git = shutil.which("git")
+        bin_dir = self.root / "failing-git-bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(f'#!/bin/sh\n[ "$3" = check-ignore ] && {{ echo "fatal: broken" >&2; exit 128; }}\n'
+                                     f'exec "{real_git}" "$@"\n')
+        (bin_dir / "git").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_link_env(Layout(wt))
+        self.assertIn("`git check-ignore` failed for ops/.env: fatal: broken", str(ctx.exception))
+        self.assertFalse(os.path.lexists(wt / "ops" / ".env"))
+
+    def test_helper_tests_read_the_fake_env_file_not_the_linked_one(self):
+        top, lay = self.make_clone()
+        (top / "ops" / ".env").write_text("API_TOKEN=REAL_SENTINEL\n")
+        wt = self.worktree(top, "wt-h", "-b", "h")
+        cmd_link_env(Layout(wt))
+        scripts = wt / "ops" / "tasks" / "02-env" / "scripts"
+        (scripts / "tests").mkdir(parents=True)
+        helper = scripts / "01-show-token.sh"
+        helper.write_text("#!/usr/bin/env bash\n# Purpose: x\n# Usage: x [--test]\n# Effect: read-only\n"
+                          "# Runs on: the Mac\n# Connection: none\n# Exit: 0 ok\nset -euo pipefail\n"
+                          'HERE="$(cd "$(dirname "$0")" && pwd)"\nLIB="$(cd "$HERE/../../lib" && pwd)"\n'
+                          '[[ "${1:-}" == --test ]] && exec python3 "$LIB/stubtest.py" "$0"\n'
+                          'source "${OPS_ENV_FILE:-$HERE/../../../.env}"\necho "token=$API_TOKEN"\n')
+        helper.chmod(0o755)
+        (scripts / "tests" / "01-show-token.json").write_text(json.dumps({"cases": [
+            {"name": "the fake env file", "env_file": "API_TOKEN=fake-sentinel\n",
+             "expect": {"stdout_contains": ["token=fake-sentinel"], "stdout_not_contains": ["REAL_SENTINEL"]}}]}))
+        proc = subprocess.run([str(helper), "--test"], capture_output=True, text=True, timeout=60)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "PASS the fake env file"), proc.stderr)
+        proc = subprocess.run([str(helper)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.stdout.strip(), "token=REAL_SENTINEL")               # the link works outside tests
+
+    def test_lint_and_link_env_stop_on_an_old_git(self):
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-o", "-b", "o")
+        real_git = shutil.which("git")
+        bin_dir = self.root / "old-git-bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(f'#!/bin/sh\n[ "$1" = --version ] && {{ echo "git version 2.35.1"; exit 0; }}\n'
+                                     f'exec "{real_git}" "$@"\n')
+        (bin_dir / "git").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        for run, cmd in ((lambda: cmd_lint(lay, [], False), "lint"), (lambda: cmd_link_env(Layout(wt)), "link-env"),
+                         (lambda: cmd_new(lay, "old"), "new")):
+            with self.assertRaises(SystemExit) as ctx:
+                run()
+            self.assertIn(f"tasks.py {cmd} needs Git 2.36 or later", str(ctx.exception))
+        self.assertEqual(cmd_lint(self.lay, [], False).errors, [])                 # outside git: any Git
+
     def test_new_outside_git_uses_the_local_lock(self):
         self.make_good_task("03-local")
         self.assertEqual(cmd_new(self.lay, "next", today="2026-11-09").name, "04-next")
@@ -2371,6 +2775,7 @@ def main(argv=None) -> int:
     n.add_argument("slug")
     n.add_argument("--title")
     sub.add_parser("status", help="list tasks")
+    sub.add_parser("link-env", help="link the main checkout's <ops-dir>/.env* files into this linked worktree")
     l = sub.add_parser("lint", help="check structure")
     l.add_argument("tasks", nargs="*", help="task folder names, e.g. 01-certs (default: all)")
     l.add_argument("--run-tests", action="store_true", help="also run every helper's --test")
@@ -2396,6 +2801,12 @@ def main(argv=None) -> int:
         print(f"{'TASK':<{w}}  {'STATUS':<11}  {'DEADLINE':<12}  CHECKBOXES (done/total, not a status)")
         for name, status, deadline, boxes in rows:
             print(f"{name:<{w}}  {status:<11}  {deadline:<12}  {boxes}")
+        return 0
+    if a.cmd == "link-env":
+        lines, warnings = cmd_link_env(lay)
+        print("\n".join(lines))
+        for w in warnings:
+            print(f"WARN  {w}")
         return 0
     rep = cmd_lint(lay, a.tasks, a.run_tests)
     for e in rep.errors:
