@@ -15,7 +15,7 @@ Both point to that plugin. Its shared skill lives under `plugins/ops-tasks/skill
 - `SKILL.md`: the rules both agents follow in a user's repo. It is the specification; `tasks.py` enforces
   the mechanical parts of it.
 - `scripts/tasks.py`: one Python file, standard library only, Python 3.9 or later, macOS or Linux.
-  In a git repo, `new`, `link-env` and `lint` need Git 2.36 or later, and `new` needs Git 2.45 or
+  In a git repo, `new`, `link-env`, `lint` and `status --all-worktrees` need Git 2.36 or later, and `new` needs Git 2.45 or
   later in a partial clone. Subcommands `init`, `new`, `status`, `link-env`, `lint [--run-tests]`,
   plus `--test` for its own self-tests.
 - `assets/TODO.md`, `assets/PLAN.md`: templates that `tasks.py new` copies. `assets/script.sh` and
@@ -33,7 +33,7 @@ Run all tests before each commit. They make no network calls.
 
 ```bash
 S=plugins/ops-tasks/skills/ops-tasks
-$S/scripts/tasks.py --test                        # 73 unittest cases, one PASS/FAIL line each
+$S/scripts/tasks.py --test                        # 76 unittest cases, one PASS/FAIL line each
 $S/assets/lib/stubtest.py --test
 $S/assets/lib/with_timeout.sh --test
 python3 scripts/check_package.py --test           # the package checker's own tests
@@ -75,6 +75,9 @@ Outside git every subcommand stops unless `--root` is given.
   in the main checkout or the linked worktree, with the source's problem and the destination's
   state. `env_link_warning` turns a row into the fix. They check file types and access only and
   never open an env file.
+- To test how `tasks.py` handles an old or failing git, put a wrapper named `git` first on `PATH`:
+  it answers the case (for example `--version`, or exit 128 for `check-ignore`) and runs the real
+  git for everything else. `setUp` restores `PATH` after the test.
 - `lint` is a set of `lint_*` functions that append to a `Report` (errors fail, warnings do not).
   The regexes near the top of the file (`STATUS_RE`, `STEP_RE`, `AFTER_BOX_RE`, `SECRET_PATTERNS`,
   `NETWORK_TOOLS`, and so on) define the shape that `lint` accepts; `SKILL.md` and the templates must

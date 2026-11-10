@@ -5,7 +5,8 @@ Purpose: keep every task folder in the same shape.
 Usage:   tasks.py [--root DIR] init [--dir NAME]         install or update <ops-dir>/tasks/lib/ from the skill (overwrites it)
          tasks.py [--root DIR] new SLUG [--title TEXT]   create <ops-dir>/tasks/NN-SLUG from templates, with
                                                          a number no task of this clone uses
-         tasks.py [--root DIR] status                    list tasks with status, deadline and checkbox counts
+         tasks.py [--root DIR] status [--all-worktrees]  list tasks with status, deadline, run count and
+                                                         checkbox counts; --all-worktrees for every worktree
          tasks.py [--root DIR] link-env                  in a linked worktree, link the main checkout's
                                                          <ops-dir>/.env* files that this worktree lacks
          tasks.py [--root DIR] lint [TASK ...] [--run-tests]
@@ -20,7 +21,7 @@ Effect:  `init` creates <ops-dir>/.ops-tasks when no marker exists, overwrites <
          `status` and `lint` only read. `lint --run-tests` runs the offline tests of <ops-dir>/tasks/lib/
          and of the helpers.
 Runs on: macOS or Linux with Python 3.9 or later. Standard library only. In a git repo, `new`,
-         `link-env` and `lint` need Git 2.36 or later, and `new` needs Git 2.45 or later in a partial
+         `link-env`, `lint` and `status --all-worktrees` need Git 2.36 or later, and `new` needs Git 2.45 or later in a partial
          clone; they stop with an error on an older Git.
 
 Task numbers (`new`):
@@ -67,6 +68,9 @@ What lint checks, and what it cannot prove:
   checkbox state for done tasks. scripts/ is optional: it exists once a task has a helper.
 - Two task folders with the same number: a warning, because renaming an existing folder breaks links
   into it. Two tasks created separately with the same full NN-slug name cannot be detected.
+- Registered worktrees: a warning for one that is missing or not that worktree, with its lock state,
+  and for one inside the current checkout that git tracks or does not ignore (`git add -A` would
+  stage it).
 - Inline local Markdown links `[text](path)` outside code. Reference-style links, paths with
   spaces or escapes, anchors and external links are not checked.
 - Explicit secret patterns only (password/secret/token assignments, license keys, private keys).
@@ -419,14 +423,17 @@ def list_worktrees(root: Path) -> list:
         key, _, value = field.partition(b" ")
         key, value = key.decode("ascii", "replace"), os.fsdecode(value)
         if key == "worktree":
-            cur = {"path": value, "head": None, "bare": False, "locked": False, "lock_reason": ""}
+            cur = {"path": value, "head": None, "branch": None, "detached": False, "bare": False,
+                   "locked": False, "lock_reason": ""}
             trees.append(cur)
         elif cur is None:
             continue
         elif key == "HEAD":
             cur["head"] = value
-        elif key == "bare":
-            cur["bare"] = True
+        elif key == "branch":
+            cur["branch"] = value
+        elif key in ("bare", "detached"):
+            cur[key] = True
         elif key == "locked":
             cur["locked"], cur["lock_reason"] = True, value
     return trees
@@ -602,8 +609,17 @@ def active_checkboxes(text: str):
             yield no, m.group(1).lower() == "x"
 
 
+def read_optional(path: Path) -> str:
+    """The text of path, or "" when it does not exist. Any other error, such as no permission on the file
+    or on its folder, raises: Path.exists() would report such a file as absent."""
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return ""
+
+
 def read_status(todo: Path):
-    text = todo.read_text() if todo.exists() else ""
+    text = read_optional(todo)
     m = STATUS_RE.search("\n".join(text.splitlines()[:12]))
     d = DEADLINE_RE.search(text)
     return (m.group(1) if m else None), (d.group(1).strip() if d else "none")
@@ -925,15 +941,156 @@ def cmd_link_env(lay: Layout) -> tuple:
 
 # --- status -------------------------------------------------------------------------------------
 
+def run_count(task: Path) -> str:
+    """The number of run folders that could be listed in task/out/, as text, or 'unreadable'. It is what
+    status saw, not proof that every piece of evidence was found or copied. Only an absent out/ counts as
+    0: an out/ that is a broken link, or that cannot be listed, is 'unreadable'."""
+    out = task / "out"
+    try:
+        os.lstat(out)
+    except FileNotFoundError:
+        return "0"
+    except OSError:
+        return "unreadable"
+    try:
+        with os.scandir(out) as entries:
+            return str(sum(1 for e in entries if e.is_dir(follow_symlinks=False)))
+    except OSError:
+        return "unreadable"
+
+
+def status_task_dirs(lay: Layout) -> list:
+    """The task folders for status. An absent <ops-dir>/tasks gives none; a broken link or a read error on
+    the way raises ScanError or OSError, so status never shows an unreadable tree as an empty one."""
+    dirs = []
+    for name in task_names_in(lay.root, lay.ops_dir):
+        d = lay.tasks / name
+        if stat.S_ISDIR(os.stat(d).st_mode):  # a broken link named like a task raises here
+            dirs.append(d)
+    return dirs
+
+
 def cmd_status(lay: Layout) -> list:
+    """One row per task: name, status, deadline, checkbox counts, run count. Raises ScanError or OSError
+    when the task folders or files cannot be read."""
     rows = []
-    for d in task_dirs(lay):
+    for d in status_task_dirs(lay):
         status, deadline = read_status(d / "TODO.md")
         plan = d / "PLAN.md"
-        boxes = list(active_checkboxes(plan.read_text())) if plan.exists() else []
+        boxes = list(active_checkboxes(read_optional(plan)))
         done = sum(1 for _, c in boxes if c)
-        rows.append((d.name, status or "?", deadline, f"{done}/{len(boxes)}"))
+        rows.append((d.name, status or "?", deadline, f"{done}/{len(boxes)}", run_count(d)))
     return rows
+
+
+def worktree_label(wt: dict) -> str:
+    if wt["branch"]:
+        return f"branch {wt['branch'][len('refs/heads/'):] if wt['branch'].startswith('refs/heads/') else wt['branch']}"
+    return f"detached at {wt['head'][:12]}" if wt["detached"] and wt["head"] else "detached"
+
+
+def cmd_status_all(lay: Layout) -> list:
+    """status for every registered worktree of the clone, the main one first: (path, label, rows). rows is
+    None when the worktree could not be read, and label then says why. Branches without a worktree are
+    not listed: this is a worktree status, not a list of every task of the repo."""
+    if not in_git(lay.root):
+        raise SystemExit("tasks.py status --all-worktrees needs a git repo. Without the flag, status reads "
+                         "this folder only.")
+    require_git_version("status --all-worktrees")
+    common = git_common_dir(lay.root)
+    try:
+        trees = list_worktrees(lay.root)
+    except ScanError as e:
+        raise SystemExit(f"{e}.")
+    result = []
+    for wt in trees:
+        path = wt["path"]
+        if wt["bare"]:
+            result.append((path, "bare repo, no checkout", None))
+            continue
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            lock = f" (locked: {wt['lock_reason'] or 'no reason given'})" if wt["locked"] else ""
+            result.append((path, f"missing{lock}", None))
+            continue
+        except OSError as e:
+            result.append((path, f"not readable: {e.strerror}", None))
+            continue
+        try:
+            check_worktree_folder(path, common)
+            ops = lay.ops_dir if same_path(path, lay.root) else find_ops_dir(Path(path))
+        except ScanError:
+            result.append((path, "the folder there is not that worktree (an empty mount point?)", None))
+            continue
+        except OSError as e:
+            result.append((path, f"not readable: {e.strerror}", None))
+            continue
+        if ops is None:
+            result.append((path, f"{worktree_label(wt)}, no {MARKER} marker", None))
+            continue
+        try:
+            rows = cmd_status(lay if same_path(path, lay.root) else Layout(Path(path), ops))
+        except ScanError as e:
+            result.append((path, f"{worktree_label(wt)}, tasks not readable: {e}", None))
+            continue
+        except OSError as e:
+            result.append((path, f"{worktree_label(wt)}, tasks not readable: {e.filename}: {e.strerror}", None))
+            continue
+        result.append((path, worktree_label(wt), rows))
+    return result
+
+
+def status_lines(rows: list) -> list:
+    w = max([len(r[0]) for r in rows] + [4])
+    lines = [f"{'TASK':<{w}}  {'STATUS':<11}  {'DEADLINE':<12}  {'RUNS':<10}  CHECKBOXES (done/total, not a status)"]
+    for name, status, deadline, boxes, runs in rows:
+        lines.append(f"{name:<{w}}  {status:<11}  {deadline:<12}  {runs:<10}  {boxes}")
+    return lines
+
+
+def lint_worktrees(lay: Layout, rep: "Report"):
+    """Warn about registered worktrees that are missing or not that worktree, with their lock state, and
+    about a worktree inside the current checkout that git tracks or does not ignore. The checks of this tree
+    go on."""
+    here = Path("git worktree list")
+    try:
+        trees = list_worktrees(lay.root)
+    except ScanError as e:
+        rep.warn(here, f"worktrees not checked: {e}")
+        return
+    common = git_common_dir(lay.root)
+    root = os.path.realpath(lay.root)
+    for wt in trees:
+        path = wt["path"]
+        if wt["bare"] or same_path(path, lay.root):
+            continue
+        lock = f"locked ({wt['lock_reason'] or 'no reason given'})" if wt["locked"] else "not locked"
+        try:
+            os.lstat(path)
+            check_worktree_folder(path, common)
+        except FileNotFoundError:
+            rep.warn(here, f"the worktree {path} is missing, {lock}. Reconnect its disk if it is still needed; "
+                           "run `git worktree prune` only after confirming that it is gone for good")
+            continue
+        except OSError as e:
+            rep.warn(here, f"cannot read the worktree {path} ({e.strerror}), {lock}")
+            continue
+        except ScanError:
+            rep.warn(here, f"the folder at {path} is not that worktree (an empty mount point?), {lock}")
+            continue
+        real = os.path.realpath(path)
+        if real.startswith(root + os.sep):
+            rel = os.path.relpath(real, root)
+            if is_tracked(lay, rel):
+                rep.warn(here, f"the worktree {rel}/ is inside the current checkout and git tracks it as an "
+                               "embedded repository, so broad staging can change its recorded commit. An ignore "
+                               f"rule alone does not stop that: remove it from the index (`git rm --cached {rel}`) "
+                               "as its own change, then ignore it or move the worktree next to the repo")
+            elif not is_ignored(lay, rel, rules_only=True):
+                rep.warn(here, f"the worktree {rel}/ is inside the current checkout and git does not ignore it, "
+                               "so `git add -A` would stage it as an embedded repository. Move it next to the "
+                               f"repo, or add '/{rel}/' to .gitignore")
 
 
 # --- lint ---------------------------------------------------------------------------------------
@@ -1519,6 +1676,7 @@ def cmd_lint(lay: Layout, names: list, with_tests: bool) -> Report:
             msg = env_link_warning(name, source, problem, state)
             if msg:
                 rep.warn(lay.ops / name, msg)
+        lint_worktrees(lay, rep)
     if with_tests:
         run_tests(lay, tasks, rep)
     return rep
@@ -1646,7 +1804,7 @@ class SelfTests(unittest.TestCase):
 
     def test_status_counts_only_active_checkboxes(self):
         self.make_good_task()
-        self.assertEqual(cmd_status(self.lay), [("01-demo", "in progress", "2026-10-09", "1/2")])
+        self.assertEqual(cmd_status(self.lay), [("01-demo", "in progress", "2026-10-09", "1/2", "0")])
 
     def test_lint_accepts_a_good_task(self):
         self.make_good_task()
@@ -2713,11 +2871,117 @@ class SelfTests(unittest.TestCase):
         (bin_dir / "git").chmod(0o755)
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
         for run, cmd in ((lambda: cmd_lint(lay, [], False), "lint"), (lambda: cmd_link_env(Layout(wt)), "link-env"),
-                         (lambda: cmd_new(lay, "old"), "new")):
+                         (lambda: cmd_new(lay, "old"), "new"), (lambda: cmd_status_all(lay), "status --all-worktrees")):
             with self.assertRaises(SystemExit) as ctx:
                 run()
             self.assertIn(f"tasks.py {cmd} needs Git 2.36 or later", str(ctx.exception))
         self.assertEqual(cmd_lint(self.lay, [], False).errors, [])                 # outside git: any Git
+
+    # --- status and worktree checks -------------------------------------------------------------
+
+    def test_status_counts_the_run_folders_it_can_list(self):
+        t = self.make_good_task("01-demo")
+        self.assertEqual(cmd_status(self.lay)[0][4], "0")
+        for run in ("20261101T100000", "20261102T100000"):
+            (t / "out" / run).mkdir(parents=True)
+        (t / "out" / "notes.txt").write_text("not a run\n")
+        self.assertEqual(cmd_status(self.lay)[0][4], "2")
+        (t / "out").chmod(0)
+        try:
+            self.assertEqual(cmd_status(self.lay)[0][4], "unreadable")
+        finally:
+            (t / "out").chmod(0o755)
+        self.assertIn("RUNS", status_lines(cmd_status(self.lay))[0])
+        shutil.rmtree(t / "out")
+        (t / "out").symlink_to(self.root / "unmounted" / "evidence")         # a broken link to the evidence
+        self.assertEqual(cmd_status(self.lay)[0][4], "unreadable")
+        t.chmod(0)                                                           # a task folder that cannot be read
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                main(["--root", str(self.root), "status"])
+        finally:
+            t.chmod(0o755)
+        self.assertIn("Cannot read the tasks: ", str(ctx.exception))
+        self.assertIn("Permission denied", str(ctx.exception))
+        (t / "PLAN.md").unlink()
+        self.assertEqual(cmd_status(self.lay)[0][3], "0/0")                  # a missing PLAN.md has no boxes
+
+    def test_status_all_worktrees_lists_each_worktree_on_its_own(self):
+        with self.assertRaises(SystemExit) as ctx:
+            cmd_status_all(self.lay)
+        self.assertIn("needs a git repo", str(ctx.exception))
+        top, lay = self.make_clone()
+        wt = self.worktree(top, "wt-a", "-b", "a")
+        (wt / "ops" / "tasks" / "02-a").mkdir()
+        (wt / "ops" / "tasks" / "02-a" / "TODO.md").write_text("# A\nStatus: open (since 2026-11-10)\n")
+        det = self.worktree(top, "wt-det", "--detach")
+        head = self.git(det, "rev-parse", "HEAD")
+        usb = self.worktree(top, "wt-usb", "-b", "usb")
+        self.git(top, "worktree", "lock", "--reason", "usb disk", str(usb))
+        shutil.move(str(usb), str(self.root / "wt-usb.away"))
+        gone = self.worktree(top, "wt-gone", "-b", "gone")
+        shutil.move(str(gone), str(self.root / "wt-gone.away"))
+        mount = self.worktree(top, "wt-mount", "-b", "mount")
+        shutil.move(str(mount), str(self.root / "wt-mount.away"))
+        mount.mkdir()                                                   # an empty mount point
+        locked_out = self.worktree(top, "wt-perm", "-b", "perm")
+        (locked_out / "ops" / "tasks" / "01-base" / "TODO.md").chmod(0)
+        closed = self.worktree(top, "wt-closed", "-b", "closed")
+        (closed / "ops" / "tasks" / "01-base").chmod(0)                 # the whole task folder, not one file
+        broken = self.worktree(top, "wt-broken", "-b", "broken")
+        shutil.move(str(broken / "ops" / "tasks"), str(self.root / "tasks.away"))
+        (broken / "ops" / "tasks").symlink_to(self.root / "unmounted" / "tasks")
+        result = {Path(path).name: (label, rows) for path, label, rows in cmd_status_all(Layout(wt))}
+        self.assertEqual(result["clone"][0], "branch main")
+        self.assertEqual([r[0] for r in result["clone"][1]], ["01-base"])
+        self.assertEqual(result["wt-a"][0], "branch a")
+        self.assertEqual([r[:2] for r in result["wt-a"][1]], [("01-base", "?"), ("02-a", "open")])  # copies stay apart
+        self.assertEqual(result["wt-det"][0], f"detached at {head[:12]}")
+        self.assertEqual(result["wt-usb"], ("missing (locked: usb disk)", None))
+        self.assertEqual(result["wt-gone"], ("missing", None))
+        self.assertEqual(result["wt-mount"], ("the folder there is not that worktree (an empty mount point?)", None))
+        self.assertIsNone(result["wt-perm"][1])
+        self.assertIn("branch perm, tasks not readable: ", result["wt-perm"][0])
+        self.assertIn("Permission denied", result["wt-perm"][0])
+        self.assertIsNone(result["wt-closed"][1])
+        self.assertIn("branch closed, tasks not readable: ", result["wt-closed"][0])
+        self.assertIn("Permission denied", result["wt-closed"][0])
+        (closed / "ops" / "tasks" / "01-base").chmod(0o755)
+        self.assertIsNone(result["wt-broken"][1])
+        self.assertIn("branch broken, tasks not readable: cannot read ", result["wt-broken"][0])
+        proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "status", "--all-worktrees"], cwd=wt,
+                              capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("wt-usb (missing (locked: usb disk))\n   not read: its tasks are unknown", proc.stdout)
+
+    def test_lint_warns_about_missing_and_nested_worktrees(self):
+        top, lay = self.make_clone()
+        nested = top / ".claude" / "worktrees" / "n"
+        nested.parent.mkdir(parents=True)
+        self.git(top, "worktree", "add", "-q", "-b", "n", str(nested))
+        usb = self.worktree(top, "wt-usb", "-b", "usb")
+        self.git(top, "worktree", "lock", "--reason", "usb disk", str(usb))
+        shutil.move(str(usb), str(self.root / "wt-usb.away"))
+        gone = self.worktree(top, "wt-gone", "-b", "gone")
+        shutil.move(str(gone), str(self.root / "wt-gone.away"))
+        rep = cmd_lint(lay, [], False)
+        self.assertFalse(any("worktree" in e for e in rep.errors), rep.errors)   # warnings only; the checks go on
+        warnings = [w for w in rep.warnings if w.startswith("git worktree list: ")]
+        self.assertEqual(len(warnings), 3, warnings)
+        self.assertIn("the worktree .claude/worktrees/n/ is inside the current checkout and git does not ignore it",
+                      warnings[0])
+        self.assertTrue(any("wt-usb is missing, locked (usb disk)" in w for w in warnings))
+        self.assertTrue(any("wt-gone is missing, not locked" in w for w in warnings))
+        with (top / ".gitignore").open("a") as f:
+            f.write("/.claude/worktrees/\n")
+        self.assertFalse(any("inside the current checkout" in w for w in cmd_lint(lay, [], False).warnings))
+        subprocess.run(["git", "-C", str(top), "add", "-f", ".claude/worktrees/n"], capture_output=True,
+                       stdin=subprocess.DEVNULL)                       # staged as an embedded repository
+        self.assertIn("160000", self.git(top, "ls-files", "--stage", ".claude/worktrees/n"))
+        nested_warnings = [w for w in cmd_lint(lay, [], False).warnings if "inside the current checkout" in w]
+        self.assertEqual(len(nested_warnings), 1)
+        self.assertIn("git tracks it as an embedded repository", nested_warnings[0])
+        self.assertIn("An ignore rule alone does not stop that", nested_warnings[0])
 
     def test_new_outside_git_uses_the_local_lock(self):
         self.make_good_task("03-local")
@@ -2774,7 +3038,8 @@ def main(argv=None) -> int:
     n = sub.add_parser("new", help="create the next <ops-dir>/tasks/NN-SLUG")
     n.add_argument("slug")
     n.add_argument("--title")
-    sub.add_parser("status", help="list tasks")
+    st = sub.add_parser("status", help="list tasks")
+    st.add_argument("--all-worktrees", action="store_true", help="also list the tasks of every worktree of the clone")
     sub.add_parser("link-env", help="link the main checkout's <ops-dir>/.env* files into this linked worktree")
     l = sub.add_parser("lint", help="check structure")
     l.add_argument("tasks", nargs="*", help="task folder names, e.g. 01-certs (default: all)")
@@ -2796,11 +3061,18 @@ def main(argv=None) -> int:
         print(f"Created {lay.rel(t)}: fill in TODO.md first.")
         return 0
     if a.cmd == "status":
-        rows = cmd_status(lay)
-        w = max([len(r[0]) for r in rows] + [4])
-        print(f"{'TASK':<{w}}  {'STATUS':<11}  {'DEADLINE':<12}  CHECKBOXES (done/total, not a status)")
-        for name, status, deadline, boxes in rows:
-            print(f"{name:<{w}}  {status:<11}  {deadline:<12}  {boxes}")
+        if not a.all_worktrees:
+            try:
+                rows = cmd_status(lay)
+            except ScanError as e:
+                raise SystemExit(f"Cannot read the tasks: {e}.")
+            except OSError as e:
+                raise SystemExit(f"Cannot read the tasks: {e.filename}: {e.strerror}.")
+            print("\n".join(status_lines(rows)))
+            return 0
+        for path, label, rows in cmd_status_all(lay):
+            print(f"== {path} ({label})")
+            print("\n".join(status_lines(rows)) if rows is not None else "   not read: its tasks are unknown")
         return 0
     if a.cmd == "link-env":
         lines, warnings = cmd_link_env(lay)

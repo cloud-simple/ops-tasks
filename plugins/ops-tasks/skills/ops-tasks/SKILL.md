@@ -214,7 +214,7 @@ It holds a lock while it scans and creates the folder, so two `new` runs in one 
 - **Locked:** `new` stops, because the disk may only be unmounted. Lock every worktree on a removable or network disk: `git worktree lock --reason "<disk>" <path>`. Unlock it with `git worktree unlock <path>` before you remove it.
 - **Not locked:** `new` warns and scans only the worktree's last commit, so the numbers and slugs of its uncommitted tasks can be reused. Reconnect the disk if the worktree is still needed. Run `git worktree prune` only after confirming that the worktree is gone for good.
 
-In a git repo, `new`, `link-env` and `lint` need Git 2.36 or later and stop with an error on an older Git. In a partial clone (a clone with a promisor remote), `new` needs Git 2.45 or later, because older Git fetches missing objects while it reads them.
+In a git repo, `new`, `link-env`, `lint` and `status --all-worktrees` need Git 2.36 or later and stop with an error on an older Git. In a partial clone (a clone with a promisor remote), `new` needs Git 2.45 or later, because older Git fetches missing objects while it reads them.
 
 `new` reads only the current `<ops-dir>` name. To move `<ops-dir>`:
 
@@ -224,6 +224,29 @@ In a git repo, `new`, `link-env` and `lint` need Git 2.36 or later and stop with
 A task branch left in the old layout can lose its number to reuse.
 
 ## Worktrees
+
+A git worktree is a second checkout of the same clone, on its own branch, in its own folder.
+
+- **One task per branch.** Create the branch from the updated default branch before the task's first change. A task can have several branches over its life, one per batch of changes, but a branch never holds two tasks.
+- **A worktree for parallel work.** A task gets its own worktree when another task or agent session is active in the same clone. With one task at a time, the main checkout works: check that `git status --porcelain` prints nothing, then run `git switch -c ops/<slug> origin/<default>`.
+- **Next to the repo.** Put a worktree in a folder next to the repo, not inside it. A worktree inside the repo must have its path ignored by git, and must not be in the index, before anyone stages broadly (`git add -A`). `lint` in that checkout warns about both.
+- **The session starts in the worktree.** The agent session that writes the task must start in the worktree. A shell `cd` does not move a running session's working folder or sandbox.
+- **Lock a worktree on a removable or network disk** (see Task numbers).
+
+### Start a task in a worktree
+
+```bash
+top=$(git rev-parse --show-toplevel) &&
+wt="$(dirname "$top")/$(basename "$top")-<slug>" &&   # next to the repo, never inside it
+git -C "$top" fetch origin &&
+git -C "$top" worktree add -b ops/<slug> "$wt" origin/<default> &&
+cd "$wt" &&
+tasks.py link-env &&                                  # links the main checkout's env files
+tasks.py new <slug> --title "<Title>" ||              # assigns the number
+{ echo "STOP: worktree setup failed; read the output above"; false; }
+```
+
+Start the agent session in `$wt` only after this block printed no `STOP` and exited with status 0. The branch carries the slug, not the number, because `tasks.py new` assigns the number after the branch exists. When `ops/<slug>` exists already, the task may exist on that branch: resume it with `git worktree add "$wt" ops/<slug>`. Never run `new` to continue an existing task.
 
 ### Env files
 
@@ -235,6 +258,27 @@ A new worktree has no `<ops-dir>/.env*` files, because git does not copy ignored
 - `link-env` never replaces an existing file or link, and never reads an env file. It stops in the main checkout and outside git, when the main checkout is missing or bare, and when git tracks or does not ignore an env file name, or cannot tell. The main checkout's own `<ops-dir>` holds the sources, even when its name differs from the worktree's. For a missing ignore rule, run `tasks.py init` as its own change.
 - In a linked worktree, `lint` warns about each env file name that is not a link to a usable file of the main checkout, and names the fix. A link must point to the main checkout's entry itself: a link straight to the file that entry points to would miss a later change of that entry.
 
+### Continue after a merge
+
+After an MR of the task is squash-merged, start the next batch of changes on a fresh branch from the updated default branch, for example `ops/<slug>-2`. The task folder and its PLAN.md stay. When commits were made after the merged MR's source head (the branch's last commit when the MR merged), review that range and move only those commits (`git cherry-pick <head>..<old-branch>` on the fresh branch). Never feed the squash-merged commits into a normal rebase: git replays them on top of their own squashed copy. When there are no later commits, the fresh branch is enough.
+
+### Remove a worktree
+
+A merged last MR alone is no reason to remove the worktree. `git worktree remove` deletes the git-ignored `out/` evidence without asking.
+
+Choose the evidence destination before the task's final MR. The usual destination is the main checkout's `<ops-dir>/tasks/NN-slug/out/`. If the user's rules forbid writing there (another session owns the main checkout), the destination is a folder the user chooses outside all worktrees, for example `../<repo>-ops-evidence/<NN-slug>/<run>/`. Record that folder in the Log of this task's PLAN.md as part of the final MR. Do not switch or update the main checkout, and do not edit its files, to make the copy work.
+
+Before `git worktree remove "$wt"`:
+
+1. Check that the worktree has no uncommitted changes and no commits after the source head of its last merged MR.
+2. Check that no agent session runs in the worktree.
+3. List the evidence: `tasks.py status --all-worktrees` shows the `out/` run count per task. The count is what `status` could list, not proof that all evidence was found.
+4. Copy each run folder to the destination. The copy creates only new run folders of this task, never overwrites a run and never follows an unexpected symbolic link at the destination.
+5. Compare each copy with its source.
+6. Run the checks of steps 1 and 2 again. Remove the worktree only when they still pass and every copy matches. A change in the worktree after step 1, such as a new Log entry, needs its own commit and MR first, and then the checks start over.
+
+Unlock a locked worktree with `git worktree unlock "$wt"` before you remove it. Neither `status` nor `lint` can stop a later `git worktree remove`; these steps protect the evidence.
+
 ## Workflow
 
 0. **First use in a repo, and after each change to `assets/lib/`:** `tasks.py init` (overwrites `<ops-dir>/tasks/lib/`, lists what changed, adds `/<ops-dir>/tasks/*/out/` and `/<ops-dir>/.env*` to `.gitignore` when missing), `tasks.py lint --run-tests`, then commit `<ops-dir>/.ops-tasks` and `<ops-dir>/tasks/lib/`. Without a marker, `init` creates `ops/.ops-tasks` at the git top level; outside git it stops with an error. The user creates `<ops-dir>/.env` with the default connection's settings and credentials.
@@ -245,7 +289,7 @@ A new worktree has no `<ops-dir>/.env*` files, because git does not copy ignored
 3. **Run:** for each step, run Before, then Do, then After. Change infrastructure only within the scope the user authorized, and honor any gate a step names. Tick each action when it ran, and the After box when the After check passed; Results and Log entries record only what the commands showed. Set status `in progress`.
 4. **Close:** `done` with the date when every active checkbox is ticked; optional steps that were not run move to `## Not used`. `dropped` with the date keeps the unticked history: write the reason in the Log, and never tick a check that did not pass.
 5. **Before committing:** run the checks below and fix every error.
-6. **MRs (merge requests):** each MR must hold the changes of one task only. When pending changes cover several tasks, split them: one branch from the default branch and one MR per task. On each branch, run `git add <paths>`, then `git commit -- <paths>`. The `git add` is required, because `git commit -- <paths>` alone skips new files.
+6. **MRs (merge requests):** each MR must hold the changes of one task only, from that task's own branch (see Worktrees). When pending changes already cover several tasks, split them: one branch from the default branch and one MR per task. On each branch, run `git add <paths>`, then `git commit -- <paths>`. The `git add` is required, because `git commit -- <paths>` alone skips new files.
    - A generated or captured file goes with the task whose change produced it.
    - Shared code goes with the task that owns that code.
    - A change that belongs to no task gets its own MR.
@@ -255,13 +299,14 @@ Commands:
 ```bash
 tasks.py init                 # install or update <ops-dir>/tasks/lib/ (overwrites it)
 tasks.py init --dir infra     # first init with infra/ as <ops-dir> instead of default ops/
-tasks.py status               # status, deadline, checkbox counts
+tasks.py status               # status, deadline, run count, checkbox counts
+tasks.py status --all-worktrees  # the same for every worktree of the clone
 tasks.py link-env             # in a linked worktree: link the main checkout's env files
 tasks.py lint                 # structure, links, secrets, helpers, lib/, env files ignored
 tasks.py lint --run-tests     # also run the tests of lib/ and every helper
 tasks.py --test               # the tool's own tests
 ```
 
-`status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status.
+`status` shows checkbox counts as counts, not as progress. The TODO.md status line is the status. `status --all-worktrees` lists each worktree on its own, with its branch or detached state; a missing worktree shows as `missing` or `missing (locked: <reason>)`, and a worktree whose tasks cannot be read says so; the tasks of both are unknown, not zero. RUNS is `unreadable` when `out/` cannot be listed. Branches without a worktree do not appear.
 
-`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It warns when two task folders share a number and, in a linked worktree, about env files that are not links to the main checkout's files. It checks the Connections table (one section, columns, an ID in every row, unique IDs, Kind), that a table with a real row has one answered `Managed systems:` line after it, that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, that the `Managed systems:` answer is true, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
+`lint` checks the shape, step IDs and After boxes, inline local links, explicit secret patterns, helper headers and shebangs, the presence of `--test`, that a remote helper sources nothing, does not call `with_timeout` and keeps its code in one `{ ... }` block, that `<ops-dir>/tasks/lib/` matches the skill, and that git ignores the env files. It warns when two task folders share a number, about a worktree that is missing or not that worktree, about a worktree inside the current checkout that git tracks or does not ignore, and, in a linked worktree, about env files that are not links to the main checkout's files. It checks the Connections table (one section, columns, an ID in every row, unique IDs, Kind), that a table with a real row has one answered `Managed systems:` line after it, that the IDs in helper `Connection:` headers and `Uses:` lines exist, and that a remote helper's `Runs on: remote:` IDs are in its `Connection:` header. It does not check reference-style links, anchors or external links. It cannot prove that no secret is present, that tests are offline and useful, that an action is authorized, that the `Managed systems:` answer is true, or that a step uses the right target; `--run-tests` runs the tests, and review does the rest.
