@@ -37,6 +37,12 @@ source "$LIB/with_timeout.sh"
 #                        [[ "${API_URL:-}" =~ ^https://([A-Za-z0-9.-]+)(:[0-9]+)?(/[A-Za-z0-9._/-]*)?$ ]] &&
 #                        [[ "$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')" == "<host name>" ]]
 #   SSH host:            [[ "${TARGET_HOST:-}" == "<host name>" ]]
+#   SSH alias:           ssh -G prints the alias's settings, with the host name in lower case. It opens
+#                        no connection, but a "Match exec" rule in the SSH config runs a command, so
+#                        bound it. Check its exit status: [[ ]] ignores a failure inside $( ).
+#                        local config
+#                        config=$(with_timeout ssh -T -G <alias> </dev/null) || return 1   # -T: no tty warning
+#                        [[ "$(awk '$1 == "hostname" { print $2 }' <<<"$config")" == "<host name>" ]]
 #   Kubernetes context:  [[ "$(kubectl config current-context)" == "<context name>" ]]
 target_ok() {
   false   # replace with one of the checks above
