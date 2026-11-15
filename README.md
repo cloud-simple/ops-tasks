@@ -140,14 +140,19 @@ claude plugin validate .                          # the marketplace manifest onl
 claude plugin validate --strict plugins/ops-tasks # the plugin manifest and its skill
 ```
 
-To release a new version, raise `version` in both `plugins/ops-tasks/.claude-plugin/plugin.json`
-and `plugins/ops-tasks/.codex-plugin/plugin.json` to the same value in a pull request, and release
-from `main` after it is merged. The release version must be the same as `version` in
-`plugin.json`. The install commands above read the plugin from the default branch, so a version
-that is not merged is not released. Immediately before creating the release tag, run
-`python3 scripts/check_package.py --release <tag>` with the selected tag, and stop if it fails. It
-checks that the tag is `v` plus that version, that the checkout is clean, and that `HEAD` is the
-commit of `main` on `origin`.
+A release has two phases. The install commands above read the plugin from the default branch, so
+a version that is not merged is not released.
+
+1. **Prepare, in a pull request.** Choose the version. Raise `version` in both
+   `plugins/ops-tasks/.claude-plugin/plugin.json` and `plugins/ops-tasks/.codex-plugin/plugin.json`
+   to it. Add its section at the top of [CHANGELOG.md](CHANGELOG.md), dated the day of the release
+   in UTC, with the changes of the pull requests merged since the last release. Merge the pull
+   request.
+2. **Publish, from `main`.** Commit nothing: `main` is protected. Immediately before creating the
+   tag, run `python3 scripts/check_package.py --release <tag>` and stop if it fails. It checks that
+   the tag is `v` plus that version, that the checkout is clean, and that `HEAD` is the commit of
+   `main` on `origin`. Create the annotated tag `v<version>`, push it, and publish the release with
+   the version's `CHANGELOG.md` section as its notes.
 
 Use the update commands for each agent above after a release. After a change to `assets/lib/`, run
 `tasks.py init` in each repo that uses the skill and commit its `<ops-dir>/tasks/lib/`.
