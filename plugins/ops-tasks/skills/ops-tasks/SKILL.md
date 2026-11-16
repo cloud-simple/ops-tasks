@@ -31,7 +31,7 @@ Each operations task lives in one folder with the same three parts.
 - `NN` is two digits: one above every number the scan in Task numbers finds. `slug` is lowercase words joined by hyphens.
 - Create each task with `tasks.py new <slug> --title "<Title>"`, not by hand. Commands: see Workflow.
 - Resolve `scripts/tasks.py` from the directory containing this loaded `SKILL.md`. Run it directly by its absolute path. Quote the path in shell commands. Keep the working directory in the user's repo so it finds the right git root. In command examples, `tasks.py` means that absolute path; it is not a command on `PATH`. Never save the installed skill path in repo files: it changes with every plugin version.
-- Write in plain language: short sentences, active voice, one term per item, `must` for requirements.
+- Write in the style that the user's and the repo's instructions set, such as `CLAUDE.md` and `AGENTS.md`.
 
 ## TODO.md: the problem and the ideas
 

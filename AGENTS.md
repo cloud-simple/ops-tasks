@@ -96,8 +96,6 @@ group under a time limit and kills the whole group afterwards.
 
 - This repo is public. No file may hold a client's name, host or repo path, in examples and
   proposals too.
-- Plain language in every prose file, `SKILL.md` included: short sentences, active voice, one term
-  per item, `must` for requirements.
 - Every script and template opens with the same header fields: `Purpose:`, `Usage:`, `Effect:`,
   `Runs on:`, and for helpers `Connection:` and `Exit:`. `lint` checks these fields in helpers.
 - Shell is bash 3.2 or later (macOS `/bin/bash`), never zsh-only syntax. Helpers are bash only.
