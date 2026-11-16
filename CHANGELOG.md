@@ -5,6 +5,21 @@ UTC, and numbers in parentheses are pull requests. "Repo only" lists changes to 
 not ship in the plugin. Versions 0.2.0 and 0.2.1 are tagged `ops-tasks--v0.2.0` and
 `ops-tasks--v0.2.1`. Later versions are tagged `v<version>`.
 
+## 0.8.0 (2026-11-16)
+
+### Changed
+
+- The skill no longer sets its own writing style for task files. It tells the agent to write in
+  the style that the user's and the repo's instructions set, such as `CLAUDE.md` and `AGENTS.md`
+  (#28).
+
+### Repo only
+
+- `CHANGELOG.md` lists the changes in each release. A release has two phases: a pull request
+  raises the version and adds the version's changelog section, then the release is published from
+  `main` with that section as its notes (#27).
+- `AGENTS.md` no longer repeats the writing style rules (#28).
+
 ## 0.7.0 (2026-11-12)
 
 ### Added
